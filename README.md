@@ -33,11 +33,15 @@ Le projet est sous licence GNU GPL v3.0.
 
 ## Structure du dépôt
 
-- `MuniRename/` app macOS SwiftUI/AppKit.
+- `MuniRename/App/` point d'entrée app.
+- `MuniRename/Features/Renaming/` UI et VM de renommage.
+- `MuniRename/Features/Presets/` store presets.
+- `MuniRename/Domain/` logique métier app.
 - `Sources/MuniRenameCore/` cœur métier testable sans Xcode.
 - `Sources/munirename-cli/` CLI manuel (`preview`, `apply`, `validate-preset`).
 - `Sources/munirename-smoketests/` smoke-tests exécutables.
 - `docs/` audit, décisions, presets, branding, status initial.
+- `scripts/xcode_build.sh` build app macOS avec Xcode.
 - `scripts/generate_appicon.sh` génération des assets AppIcon.
 
 ## Installation / Build
@@ -52,6 +56,12 @@ open MuniRename.xcodeproj
 
 2. Sélectionner le schéma `MuniRename`.
 3. Lancer l'application (`Run`).
+
+Build CLI Xcode reproductible (utile si `xcode-select` pointe sur CommandLineTools):
+
+```bash
+./scripts/xcode_build.sh
+```
 
 ## Option B — Sans Xcode complet (CLI + core)
 
@@ -100,7 +110,6 @@ swift run munirename-cli validate-preset --preset ./preset.json
 
 ## Limitations connues
 
-- La CI actuelle valide le cœur métier et le CLI, pas encore le build UI Xcode complet.
 - L'éditeur de presets est fonctionnel mais peut encore être simplifié visuellement.
 - Une migration de presets multi-versions plus avancée sera ajoutée avec les futures versions.
 
@@ -108,7 +117,6 @@ swift run munirename-cli validate-preset --preset ./preset.json
 
 - Améliorer encore l'ergonomie de l'éditeur de presets.
 - Ajouter export de rapport d'opération.
-- Ajouter CI build app macOS Xcode complète.
 - Stabiliser vers une version `v1.0.0` quand UX + robustesse + packaging seront finalisés.
 
 ## Développement

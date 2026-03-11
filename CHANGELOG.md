@@ -6,6 +6,17 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/) et ce pr
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-03-11
+
+### Added
+- Script `scripts/xcode_build.sh` pour builder l'app avec Xcode complet même si `xcode-select` pointe sur CommandLineTools.
+- Document `docs/STATUS-CURRENT.md` avec procédure de validation Xcode actuelle.
+- Notes de release `docs/RELEASE-NOTES-v0.2.1.md`.
+
+### Changed
+- Arborescence app nettoyée: `App/`, `Features/`, `Domain/` pour une maintenance plus claire côté Xcode.
+- CI enrichie avec un job de build app macOS Xcode (`./scripts/xcode_build.sh`).
+
 ## [0.2.0] - 2026-03-11
 
 ### Added
