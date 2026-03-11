@@ -1,71 +1,123 @@
 # MuniRename
 
-MuniRename est une application macOS (SwiftUI) de renommage de fichiers en lot, avec aperçu en direct, règles combinables et presets JSON.
+MuniRename est un logiciel de renommage en lot **manuel** pour macOS, inspiré par la puissance d'outils comme Bulk Rename Utility, avec une interface plus lisible et orientée usage quotidien.
+
+Le projet est sous licence GNU GPL v3.0.
+
+## Objectif produit
+
+- Renommer des lots de fichiers de façon contrôlée.
+- Prévisualiser les résultats avant d'écrire quoi que ce soit sur disque.
+- Rester explicite et manuel: pas d'orchestration automatisée cachée.
 
 ## Fonctionnalités
 
-- Chargement d'un dossier avec options récursives et prise en charge des fichiers cachés.
-- Prévisualisation en direct du nouveau nom avant application.
-- Règles de renommage activables individuellement:
-- Remplacer (texte ou regex, sensible/insensible à la casse)
-- Retirer (plage de caractères, trim, réduction des espaces)
-- Ajouter (préfixe, suffixe, insertion à une position donnée)
-- Date automatique (préfixe, suffixe, insertion à position)
-- Numérotation (départ, pas, padding, patron `#`, sélection uniquement)
-- Casse (inchangée, minuscules, MAJUSCULES, casse titre)
-- Extension (nouvelle extension + transformation de casse)
-- Dossier parent (ajout en préfixe ou suffixe)
-- Spécial (normalisation Unicode, suppression accents, remplacement espaces/tiret)
-- Destination configurable:
-- Renommer sur place
-- Déplacer vers un autre dossier
-- Copier au lieu de déplacer
-- Sélection partielle des fichiers et prévisualisation limitée à la sélection.
-- Undo de la dernière opération appliquée.
-- Gestionnaire de presets:
-- création, duplication, suppression
-- catégories
-- import/export JSON
-- application depuis une fenêtre dédiée
+- Prévisualisation en direct des nouveaux noms.
+- Règles combinables:
+- remplacement (texte/regex)
+- suppression par plage
+- ajout préfixe/suffixe/insertion
+- date automatique
+- numérotation (padding, pas, pattern)
+- casse
+- extension
+- ajout dossier parent
+- transformations spéciales
+- Filtres (regex, récursif, fichiers cachés).
+- Destination configurable (sur place, autre dossier, copie).
+- Gestion des collisions et validations de noms.
+- Exécution de déplacement en 2 phases pour fiabiliser les swaps.
+- Undo de la dernière opération.
+- Presets versionnés (création, duplication, édition, import/export JSON, reset défauts).
+- Rapport de simulation et rapport post-exécution.
 
-## Prérequis
+## Structure du dépôt
 
-- macOS
-- Xcode (version récente compatible SwiftUI)
+- `MuniRename/` app macOS SwiftUI/AppKit.
+- `Sources/MuniRenameCore/` cœur métier testable sans Xcode.
+- `Sources/munirename-cli/` CLI manuel (`preview`, `apply`, `validate-preset`).
+- `Sources/munirename-smoketests/` smoke-tests exécutables.
+- `docs/` audit, décisions, presets, branding, status initial.
+- `scripts/generate_appicon.sh` génération des assets AppIcon.
 
-## Installation et lancement
+## Installation / Build
 
-1. Cloner le dépôt:
+## Option A — Application macOS (Xcode)
 
-```bash
-git clone https://github.com/Macthieu/MuniRename.git
-cd MuniRename
-```
-
-2. Ouvrir le projet:
+1. Ouvrir le projet:
 
 ```bash
 open MuniRename.xcodeproj
 ```
 
-3. Dans Xcode, sélectionner le schéma `MuniRename` puis lancer l'app (`Run`).
+2. Sélectionner le schéma `MuniRename`.
+3. Lancer l'application (`Run`).
 
-## Utilisation rapide
+## Option B — Sans Xcode complet (CLI + core)
 
-1. Cliquer sur `Choisir un dossier`.
-2. Activer les règles souhaitées dans le panneau de gauche.
-3. Vérifier la colonne `Nouveau nom`.
-4. Cliquer sur `Appliquer`.
-5. Si nécessaire, utiliser `Undo` pour annuler la dernière opération.
+Prérequis: Swift installé (`swift --version`).
+
+```bash
+swift build
+swift run munirename-smoketests
+swift run munirename-cli --help
+```
+
+## Usage (app)
+
+1. Choisir un dossier source.
+2. Activer les règles nécessaires.
+3. Vérifier la simulation / preview.
+4. Confirmer l'application.
+5. Consulter le rapport et utiliser `Annuler` si nécessaire.
+
+## Usage (CLI)
+
+```bash
+swift run munirename-cli preview --preset ./preset.json --directory ./dossier
+swift run munirename-cli apply --preset ./preset.json --directory ./dossier --dry-run
+swift run munirename-cli validate-preset --preset ./preset.json
+```
 
 ## Presets
 
-Les presets sont enregistrés dans `~/Library/Application Support/MuniRename/` et peuvent être importés/exportés au format JSON.
+- Un preset est un profil de renommage réutilisable.
+- Format versionné (`formatVersion`) avec compatibilité de lecture des formats précédents.
+- Stockage principal local:
+- `~/Library/Application Support/MuniRename/presets.json`
+- Détails: voir `docs/PRESETS.md`.
 
-## Sécurité
+## Branding / icône
 
-Le renommage de masse modifie ou déplace des fichiers réels. Il est recommandé de tester d'abord sur un dossier de copie avant usage en production.
+- Source icône: `assets/branding/MuniRename_icon_source.png`
+- Génération AppIcon:
+
+```bash
+./scripts/generate_appicon.sh
+```
+
+- Détails: voir `docs/BRANDING.md`.
+
+## Limitations connues
+
+- La CI actuelle valide le cœur métier et le CLI, pas encore le build UI Xcode complet.
+- L'éditeur de presets est fonctionnel mais peut encore être simplifié visuellement.
+- Une migration de presets multi-versions plus avancée sera ajoutée avec les futures versions.
+
+## Roadmap
+
+- Améliorer encore l'ergonomie de l'éditeur de presets.
+- Ajouter export de rapport d'opération.
+- Ajouter CI build app macOS Xcode complète.
+- Stabiliser vers une version `v1.0.0` quand UX + robustesse + packaging seront finalisés.
+
+## Développement
+
+- CI GitHub: `.github/workflows/ci.yml`
+- Changelog: `CHANGELOG.md`
+- Décisions d'architecture: `docs/DECISIONS.md`
 
 ## Licence
 
-Ce projet est distribué sous licence GNU GPL v3.0. Voir le fichier `LICENSE`.
+Ce projet est distribué sous licence GNU GPL v3.0.
+Voir `LICENSE`.

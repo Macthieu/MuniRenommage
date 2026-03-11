@@ -45,7 +45,10 @@ struct DestinationSec:Codable { var enabled = false; var url: URL? = nil; var co
 
 // MARK: - Preset (renommé pour éviter toute collision)
 struct RenamePreset: Codable, Identifiable, Equatable {
+    static let currentFormatVersion = 1
+
     var id = UUID()
+    var formatVersion: Int = RenamePreset.currentFormatVersion
     var name: String = "Sans titre"
     var category: String = "Divers"
     var replace: ReplaceSec = .init()
@@ -61,11 +64,99 @@ struct RenamePreset: Codable, Identifiable, Equatable {
     var destination: DestinationSec = .init()
 
     static func == (lhs: RenamePreset, rhs: RenamePreset) -> Bool { lhs.id == rhs.id }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case formatVersion
+        case name
+        case category
+        case replace
+        case remove
+        case add
+        case date
+        case num
+        case casing
+        case ext
+        case folder
+        case special
+        case filters
+        case destination
+    }
+
+    init(
+        id: UUID = UUID(),
+        formatVersion: Int = RenamePreset.currentFormatVersion,
+        name: String = "Sans titre",
+        category: String = "Divers",
+        replace: ReplaceSec = .init(),
+        remove: RemoveSec = .init(),
+        add: AddSec = .init(),
+        date: DateSec = .init(),
+        num: NumberingSec = .init(),
+        casing: CaseSec = .init(),
+        ext: ExtSec = .init(),
+        folder: FolderNameSec = .init(),
+        special: SpecialSec = .init(),
+        filters: FiltersSec = .init(),
+        destination: DestinationSec = .init()
+    ) {
+        self.id = id
+        self.formatVersion = formatVersion
+        self.name = name
+        self.category = category
+        self.replace = replace
+        self.remove = remove
+        self.add = add
+        self.date = date
+        self.num = num
+        self.casing = casing
+        self.ext = ext
+        self.folder = folder
+        self.special = special
+        self.filters = filters
+        self.destination = destination
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        formatVersion = try container.decodeIfPresent(Int.self, forKey: .formatVersion) ?? RenamePreset.currentFormatVersion
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? "Sans titre"
+        category = try container.decodeIfPresent(String.self, forKey: .category) ?? "Divers"
+        replace = try container.decodeIfPresent(ReplaceSec.self, forKey: .replace) ?? .init()
+        remove = try container.decodeIfPresent(RemoveSec.self, forKey: .remove) ?? .init()
+        add = try container.decodeIfPresent(AddSec.self, forKey: .add) ?? .init()
+        date = try container.decodeIfPresent(DateSec.self, forKey: .date) ?? .init()
+        num = try container.decodeIfPresent(NumberingSec.self, forKey: .num) ?? .init()
+        casing = try container.decodeIfPresent(CaseSec.self, forKey: .casing) ?? .init()
+        ext = try container.decodeIfPresent(ExtSec.self, forKey: .ext) ?? .init()
+        folder = try container.decodeIfPresent(FolderNameSec.self, forKey: .folder) ?? .init()
+        special = try container.decodeIfPresent(SpecialSec.self, forKey: .special) ?? .init()
+        filters = try container.decodeIfPresent(FiltersSec.self, forKey: .filters) ?? .init()
+        destination = try container.decodeIfPresent(DestinationSec.self, forKey: .destination) ?? .init()
+    }
 }
 
 // MARK: - ViewModel du renommeur
 final class RenameVM: ObservableObject {
-    enum UndoEntry { case move(from: URL, to: URL), delete(url: URL) }
+    struct RunSummary {
+        let targetCount: Int
+        let blockedCount: Int
+        let unchangedCount: Int
+        let plannedCount: Int
+    }
+
+    struct RunReport {
+        let date: Date
+        let targetCount: Int
+        let blockedCount: Int
+        let unchangedCount: Int
+        let plannedCount: Int
+        let renamedCount: Int
+        let errorCount: Int
+        let issues: [String]
+    }
 
     @Published var directoryURL: URL?
     @Published var entries: [FileEntry] = []
@@ -90,8 +181,9 @@ final class RenameVM: ObservableObject {
     @Published var preview: [UUID: String] = [:]
     @Published var statuses: [UUID: String] = [:]
     @Published var isLoading = false
+    @Published var lastRunReport: RunReport?
 
-    private var undoJournal: [UndoEntry] = []
+    private var undoJournal: [RenameUndoAction] = []
     private let worker = DispatchQueue(label: "RenameVM.worker", qos: .userInitiated)
     private var previewJob = 0
 
@@ -172,201 +264,26 @@ final class RenameVM: ObservableObject {
         let jobId = previewJob &+ 1
         previewJob = jobId
 
-        let entries   = self.entries
-        let replace   = self.replace
-        let remove    = self.remove
-        let add       = self.add
-        let date      = self.date
-        let num       = self.num
-        let casing    = self.casing
-        let ext       = self.ext
-        let folder    = self.folder
-        let special   = self.special
-        let dirURL    = self.directoryURL
+        let entries = self.entries
+        let rules = self.currentRules
+        let dirURL = self.directoryURL
         let selection = self.selection
         let previewOnlySelection = self.previewOnlySelection
 
-        // Liste concrète des fichiers sélectionnés
-        let selectionList: [FileEntry] =
-            selection.isEmpty ? [] : entries.filter { selection.contains($0.id) }
-
-        // Scope global de l’aperçu : tous les fichiers ou seulement la sélection
-        let previewScope: [FileEntry]
-        if previewOnlySelection, !selectionList.isEmpty {
-            previewScope = selectionList
-        } else {
-            previewScope = entries
-        }
-
-        // Scope de numérotation :
-        // - si "Numérotation → seulement pour la sélection" est cochée → on utilise la sélection
-        // - sinon → on suit le scope de l’aperçu
-        let numberingTargets: [FileEntry]
-        if num.onlySelection, !selectionList.isEmpty {
-            numberingTargets = selectionList
-        } else {
-            numberingTargets = previewScope
-        }
-
-        let orderIndex: [UUID: Int] = Dictionary(
-            uniqueKeysWithValues: numberingTargets.enumerated().map { ($0.element.id, $0.offset) }
-        )
-
-        // Ensemble des fichiers pour lesquels on applique réellement les règles
-        let previewTargetIDs = Set(previewScope.map(\.id))
-
         worker.async { [weak self] in
             guard let self else { return }
-            var newPreview: [UUID: String] = [:]
-            var newStatuses: [UUID: String] = [:]
-
-            for e in entries {
-                // Hors du scope d’aperçu → on garde le nom original et on ne touche pas
-                guard previewTargetIDs.contains(e.id) else {
-                    newPreview[e.id] = e.originalName
-                    continue
-                }
-
-                var base = e.baseName
-
-                // 1) Remplacer
-                if replace.enabled, !replace.find.isEmpty {
-                    if replace.regex,
-                       let rx = try? NSRegularExpression(
-                            pattern: replace.find,
-                            options: replace.caseSensitive ? [] : [.caseInsensitive]
-                       ) {
-                        base = rx.stringByReplacingMatches(
-                            in: base,
-                            range: NSRange(base.startIndex..<base.endIndex, in: base),
-                            withTemplate: replace.replace
-                        )
-                    } else if !replace.regex {
-                        base = base.replacingOccurrences(
-                            of: replace.find,
-                            with: replace.replace,
-                            options: replace.caseSensitive ? [] : [.caseInsensitive]
-                        )
-                    }
-                }
-
-                // 2) Retirer
-                if remove.enabled {
-                    if let from = remove.from,
-                       let to = remove.to,
-                       from > 0,
-                       to >= from,
-                       from <= base.count {
-                        let f = base.index(base.startIndex, offsetBy: from - 1)
-                        let t = base.index(base.startIndex, offsetBy: min(to, base.count) - 1)
-                        base.removeSubrange(f...t)
-                    }
-                    if remove.trimWhitespace {
-                        base = base.trimmingCharacters(in: .whitespacesAndNewlines)
-                    }
-                    if remove.collapseSpaces {
-                        base = base.replacingOccurrences(
-                            of: "\\s+",
-                            with: " ",
-                            options: .regularExpression
-                        )
-                    }
-                }
-
-                // 3) Ajouter
-                if add.enabled {
-                    if add.usePrefix { base = add.prefix + base }
-                    if add.useSuffix { base += add.suffix }
-                    if !add.insertText.isEmpty {
-                        let idx0 = max(0, min(add.insertIndex - 1, base.count))
-                        base.insert(
-                            contentsOf: add.insertText,
-                            at: base.index(base.startIndex, offsetBy: idx0)
-                        )
-                    }
-                }
-
-                // 4) Date auto
-                if date.enabled {
-                    let df = DateFormatter()
-                    df.locale = .current
-                    df.dateFormat = date.format
-                    let stamp = df.string(from: Date())
-                    if date.usePrefix { base = stamp + " " + base }
-                    if date.useAtPosition {
-                        let idx0 = max(0, min(date.atIndex - 1, base.count))
-                        base.insert(
-                            contentsOf: stamp,
-                            at: base.index(base.startIndex, offsetBy: idx0)
-                        )
-                    }
-                    if date.useSuffix { base = base + " " + stamp }
-                }
-
-                // 5) Numérotation
-                if num.enabled, let idx = orderIndex[e.id] {
-                    let n = num.start + idx * num.step
-                    let token = self.formatNumber(n, using: num)
-                    base = num.asPrefix ? token + num.sep + base : base + num.sep + token
-                }
-
-                // 6) Casse
-                if casing.enabled {
-                    switch casing.style {
-                    case .unchanged: break
-                    case .lower: base = base.lowercased()
-                    case .upper: base = base.uppercased()
-                    case .title: base = base.localizedCapitalized
-                    }
-                }
-
-                // 7) Dossier parent
-                if folder.enabled, let parent = dirURL?.lastPathComponent {
-                    let addStr = parent + folder.sep
-                    base = folder.addParentAsPrefix ? addStr + base : base + folder.sep + parent
-                }
-
-                // 8) Spécial
-                if special.enabled {
-                    if special.normalizeUnicode {
-                        base = base.precomposedStringWithCanonicalMapping
-                    }
-                    if special.stripDiacritics {
-                        base = base.folding(options: .diacriticInsensitive, locale: .current)
-                    }
-                    if special.dashToEnDash {
-                        base = base.replacingOccurrences(of: " - ", with: " – ")
-                    }
-                    if special.spacesToUnderscore {
-                        base = base.replacingOccurrences(of: " ", with: "_")
-                    }
-                }
-
-                // 9) Extension
-                var extPartFinal = e.ext
-                if ext.enabled {
-                    if !ext.newExt.isEmpty {
-                        extPartFinal = ext.newExt.replacingOccurrences(of: ".", with: "")
-                    }
-                    switch ext.caseChange {
-                    case .none: break
-                    case .lower: extPartFinal = extPartFinal.lowercased()
-                    case .upper: extPartFinal = extPartFinal.uppercased()
-                    }
-                }
-
-                let finalName = extPartFinal.isEmpty
-                    ? base
-                    : base + "." + extPartFinal
-
-                newPreview[e.id] = finalName
-                newStatuses[e.id] = ""
-            }
+            let result = RenameEngine.computePreview(
+                entries: entries,
+                directoryURL: dirURL,
+                selection: selection,
+                previewOnlySelection: previewOnlySelection,
+                rules: rules
+            )
 
             DispatchQueue.main.async {
                 guard self.previewJob == jobId else { return }
-                self.preview = newPreview
-                self.statuses = newStatuses
+                self.preview = result.names
+                self.statuses = result.statuses
             }
         }
     }
@@ -374,33 +291,40 @@ final class RenameVM: ObservableObject {
     // Appliquer / Undo
     func apply() {
         guard directoryURL != nil else { return }
-        undoJournal.removeAll()
-        var hadError = false
+        let targets = targetEntries()
+        let summary = runSummary(for: targets)
 
-        let targets: [FileEntry] = selection.isEmpty ? entries : entries.filter { selection.contains($0.id) }
+        let result = RenameEngine.apply(
+            entries: entries,
+            selection: selection,
+            outputNames: preview,
+            rules: currentRules
+        )
 
-        for e in targets {
-            guard let nn = preview[e.id], !nn.isEmpty else { continue }
-            if statuses[e.id]?.isEmpty == false { hadError = true; continue }
-
-            let baseDir = destination.enabled ? (destination.url ?? e.url.deletingLastPathComponent()) : e.url.deletingLastPathComponent()
-            let dest = baseDir.appendingPathComponent(nn)
-
-            if FileManager.default.fileExists(atPath: dest.path) { statuses[e.id] = "Existant"; hadError = true; continue }
-
-            do {
-                if destination.enabled && destination.copyInsteadOfMove {
-                    try FileManager.default.copyItem(at: e.url, to: dest)
-                    undoJournal.append(.delete(url: dest))
-                } else {
-                    try FileManager.default.moveItem(at: e.url, to: dest)
-                    undoJournal.append(.move(from: dest, to: e.url))
-                }
-            } catch {
-                statuses[e.id] = "Erreur: \(error.localizedDescription)"; hadError = true
-            }
+        let issues: [String] = targets.compactMap { entry in
+            let status = result.statuses[entry.id] ?? ""
+            guard !status.isEmpty else { return nil }
+            let output = preview[entry.id] ?? entry.originalName
+            return "\(entry.originalName) -> \(output): \(status)"
         }
-        loadEntries(); if hadError { NSSound.beep() }
+
+        statuses = result.statuses
+        undoJournal = result.undoActions
+        lastRunReport = RunReport(
+            date: Date(),
+            targetCount: summary.targetCount,
+            blockedCount: summary.blockedCount,
+            unchangedCount: summary.unchangedCount,
+            plannedCount: summary.plannedCount,
+            renamedCount: result.renamedCount,
+            errorCount: result.errorCount,
+            issues: issues
+        )
+        loadEntries()
+
+        if result.errorCount > 0 {
+            NSSound.beep()
+        }
     }
 
     func undoLast() {
@@ -409,13 +333,81 @@ final class RenameVM: ObservableObject {
         for op in undoJournal {
             do {
                 switch op {
-                case let .move(from, to): try FileManager.default.moveItem(at: from, to: to)
-                case let .delete(url):    try FileManager.default.removeItem(at: url)
+                case let .move(from, to):
+                    try FileManager.default.moveItem(at: from, to: to)
+                case let .delete(url):
+                    try FileManager.default.removeItem(at: url)
                 }
             } catch { failures += 1 }
         }
         undoJournal.removeAll()
-        loadEntries(); if failures > 0 { NSSound.beep() }
+        loadEntries()
+        if failures > 0 { NSSound.beep() }
+    }
+
+    func runSummary(for entriesScope: [FileEntry]? = nil) -> RunSummary {
+        let targets = entriesScope ?? targetEntries()
+
+        var blocked = 0
+        var unchanged = 0
+
+        for entry in targets {
+            let status = statuses[entry.id] ?? ""
+            if !status.isEmpty {
+                blocked += 1
+                continue
+            }
+
+            let output = preview[entry.id] ?? entry.originalName
+            if output == entry.originalName {
+                unchanged += 1
+            }
+        }
+
+        let planned = max(0, targets.count - blocked - unchanged)
+        return RunSummary(
+            targetCount: targets.count,
+            blockedCount: blocked,
+            unchangedCount: unchanged,
+            plannedCount: planned
+        )
+    }
+
+    var applySummaryText: String {
+        let s = runSummary()
+        return """
+        Cibles: \(s.targetCount)
+        Planifiées: \(s.plannedCount)
+        Bloquées (erreurs): \(s.blockedCount)
+        Inchangées: \(s.unchangedCount)
+        """
+    }
+
+    var simulationReportText: String {
+        let targets = targetEntries()
+        let s = runSummary(for: targets)
+
+        var lines: [String] = []
+        lines.append("Simulation MuniRename")
+        lines.append("Cibles: \(s.targetCount)")
+        lines.append("Planifiées: \(s.plannedCount)")
+        lines.append("Bloquées: \(s.blockedCount)")
+        lines.append("Inchangées: \(s.unchangedCount)")
+        lines.append("")
+        lines.append("Détail:")
+
+        for entry in targets {
+            let output = preview[entry.id] ?? entry.originalName
+            let status = statuses[entry.id] ?? ""
+            let suffix = status.isEmpty ? "" : " [\(status)]"
+            lines.append("- \(entry.originalName) -> \(output)\(suffix)")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func targetEntries() -> [FileEntry] {
+        selection.isEmpty ? entries : entries.filter { selection.contains($0.id) }
     }
 
     // Combine triggers
@@ -430,34 +422,26 @@ final class RenameVM: ObservableObject {
             $ext.map     { _ in () }.eraseToAnyPublisher(),
             $folder.map  { _ in () }.eraseToAnyPublisher(),
             $special.map { _ in () }.eraseToAnyPublisher(),
+            $destination.map { _ in () }.eraseToAnyPublisher(),
             $previewOnlySelection.map { _ in () }.eraseToAnyPublisher(),
             $selection.map { _ in () }.eraseToAnyPublisher()
         ]
         return Publishers.MergeMany(pubs).eraseToAnyPublisher()
     }
 
-    // Formattage de la numérotation selon le masque (ex. 04.##, 4.01.##)
-    private func formatNumber(_ n: Int, using num: NumberingSec) -> String {
-        let rawPattern = num.pattern.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Aucun masque → comportement classique (001, 002, 003…)
-        guard !rawPattern.isEmpty else {
-            return String(format: "%0*d", num.pad, n)
-        }
-
-        // On cherche une séquence de # (ex. "##", "###")
-        if let range = rawPattern.range(of: #"#{1,}"#, options: .regularExpression) {
-            let hashesCount = rawPattern[range].count
-            let formatted = String(format: "%0*d", hashesCount, n)
-
-            var result = rawPattern
-            result.replaceSubrange(range, with: formatted)
-            return result
-        } else {
-            // Pas de # dans le masque → on colle le nombre à la fin
-            let numPart = String(format: "%0*d", num.pad, n)
-            return rawPattern + numPart
-        }
+    var currentRules: RenameRules {
+        RenameRules(
+            replace: replace,
+            remove: remove,
+            add: add,
+            date: date,
+            num: num,
+            casing: casing,
+            ext: ext,
+            folder: folder,
+            special: special,
+            destination: destination
+        )
     }
 
     // VM <-> Preset
@@ -542,12 +526,19 @@ struct ContentView: View {
     @EnvironmentObject var presetStore: RenamePresetStore
     @StateObject var vm = RenameVM()
     @Environment(\.openWindow) private var openWindow
+    @State private var showApplyConfirmation = false
+    @State private var showSimulation = false
+    @State private var showRunReport = false
 
     var body: some View {
         VStack(spacing: 0) {
             toolbar
             Divider()
             mainLayout
+            if let report = vm.lastRunReport {
+                Divider()
+                reportBanner(report)
+            }
         }
         .frame(minWidth: 900, minHeight: 560)
         // Appliquer un preset choisi dans la fenêtre “Presets”
@@ -555,6 +546,100 @@ struct ContentView: View {
             vm.apply(preset: p)
             presetStore.presetToApply = nil
         }
+        .alert("Confirmer l'application", isPresented: $showApplyConfirmation) {
+            Button("Annuler", role: .cancel) {}
+            Button("Appliquer", role: .destructive) {
+                vm.apply()
+                showRunReport = vm.lastRunReport != nil
+            }
+        } message: {
+            Text(vm.applySummaryText)
+        }
+        .sheet(isPresented: $showSimulation) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Simulation")
+                    .font(.headline)
+                ScrollView {
+                    Text(vm.simulationReportText)
+                        .font(.system(.body, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                HStack {
+                    Spacer()
+                    Button("Fermer") { showSimulation = false }
+                }
+            }
+            .padding(16)
+            .frame(minWidth: 720, minHeight: 480)
+        }
+        .sheet(isPresented: $showRunReport) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Rapport d'exécution")
+                    .font(.headline)
+                ScrollView {
+                    Text(runReportText)
+                        .font(.system(.body, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                HStack {
+                    Spacer()
+                    Button("Fermer") { showRunReport = false }
+                }
+            }
+            .padding(16)
+            .frame(minWidth: 720, minHeight: 480)
+        }
+    }
+
+    @ViewBuilder
+    private func reportBanner(_ report: RenameVM.RunReport) -> some View {
+        let hasErrors = report.errorCount > 0
+        HStack(spacing: 12) {
+            Image(systemName: hasErrors ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                .foregroundStyle(hasErrors ? .orange : .green)
+            Text(hasErrors
+                ? "Dernière opération: \(report.renamedCount) succès, \(report.errorCount) erreur(s)."
+                : "Dernière opération réussie: \(report.renamedCount) fichier(s) traité(s)."
+            )
+            .font(.callout)
+            Spacer()
+            Button("Voir le rapport") { showRunReport = true }
+                .buttonStyle(.link)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(hasErrors ? Color.orange.opacity(0.12) : Color.green.opacity(0.12))
+    }
+
+    private var runReportText: String {
+        guard let report = vm.lastRunReport else {
+            return "Aucun rapport disponible."
+        }
+
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .medium
+
+        var lines: [String] = []
+        lines.append("Date: \(formatter.string(from: report.date))")
+        lines.append("Cibles: \(report.targetCount)")
+        lines.append("Planifiées: \(report.plannedCount)")
+        lines.append("Bloquées avant exécution: \(report.blockedCount)")
+        lines.append("Inchangées: \(report.unchangedCount)")
+        lines.append("Traitées avec succès: \(report.renamedCount)")
+        lines.append("Erreurs: \(report.errorCount)")
+        lines.append("")
+        lines.append("Détail erreurs/blocages:")
+
+        if report.issues.isEmpty {
+            lines.append("- Aucun")
+        } else {
+            for issue in report.issues {
+                lines.append("- \(issue)")
+            }
+        }
+
+        return lines.joined(separator: "\n")
     }
 
     // SplitView
@@ -674,18 +759,22 @@ struct ContentView: View {
 
             // Boutons presets
             Button("Gestion des presets…") { openWindow(id: "presets") }
-            Button("Charger preset…") { presetStore.importSingle() }
-            Button("Enregistrer preset de la configuration courante…") {
+            Button("Importer preset…") { presetStore.importSingle() }
+            Button("Sauver preset courant…") {
                 var p = vm.currentPreset
+                p.formatVersion = RenamePreset.currentFormatVersion
                 p.name = "Preset depuis la fenêtre"
                 presetStore.items.append(p)
                 presetStore.save()
             }
 
             Divider().frame(height: 18)
-            Button { vm.apply() } label: { Label("Appliquer", systemImage: "hammer") }
+            Button { showSimulation = true } label: { Label("Simulation", systemImage: "doc.text.magnifyingglass") }
+            Button { showRunReport = vm.lastRunReport != nil } label: { Label("Dernier rapport", systemImage: "list.bullet.clipboard") }
+                .disabled(vm.lastRunReport == nil)
+            Button { showApplyConfirmation = true } label: { Label("Appliquer", systemImage: "hammer") }
                 .keyboardShortcut(.return)
-            Button { vm.undoLast() } label: { Label("Undo", systemImage: "arrow.uturn.backward") }
+            Button { vm.undoLast() } label: { Label("Annuler", systemImage: "arrow.uturn.backward") }
                 .keyboardShortcut("z", modifiers: [.command, .shift])
         }
         .padding(8)
@@ -706,6 +795,7 @@ struct ContentView: View {
 struct PresetsManagerView: View {
     @EnvironmentObject var store: RenamePresetStore
     @State private var selection: RenamePreset.ID?
+    @State private var showResetConfirmation = false
 
     private func bindingForSelection() -> Binding<RenamePreset>? {
         guard let id = selection,
@@ -740,8 +830,7 @@ struct PresetsManagerView: View {
                             alert.addButton(withTitle: "OK")
                             alert.addButton(withTitle: "Annuler")
                             if alert.runModal() == .alertFirstButtonReturn {
-                                store.items.append(RenamePreset(name: "Nouveau preset", category: tf.stringValue))
-                                store.save()
+                                store.add(category: tf.stringValue)
                             }
                         }
                     } label: {
@@ -778,6 +867,14 @@ struct PresetsManagerView: View {
                         Label("Exporter…", systemImage: "square.and.arrow.up")
                     }
                         .disabled(selection == nil)
+
+                    Divider()
+
+                    Button {
+                        showResetConfirmation = true
+                    } label: {
+                        Label("Réinitialiser défauts", systemImage: "arrow.counterclockwise")
+                    }
                 }
             }
         } detail: {
@@ -788,12 +885,50 @@ struct PresetsManagerView: View {
                 .padding(12)
                 .navigationTitle(binding.wrappedValue.name)
             } else {
-                ContentUnavailableView(
-                    "Aucun preset sélectionné",
-                    systemImage: "text.badge.plus",
-                    description: Text("Choisissez ou créez un preset dans la liste.")
-                )
+                if #available(macOS 14.0, *) {
+                    ContentUnavailableView(
+                        "Aucun preset sélectionné",
+                        systemImage: "text.badge.plus",
+                        description: Text("Choisissez ou créez un preset dans la liste.")
+                    )
+                } else {
+                    VStack(spacing: 8) {
+                        Image(systemName: "text.badge.plus")
+                            .font(.system(size: 24))
+                            .foregroundStyle(.secondary)
+                        Text("Aucun preset sélectionné")
+                            .font(.headline)
+                        Text("Choisissez ou créez un preset dans la liste.")
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             }
+        }
+        .alert("Réinitialiser les presets ?", isPresented: $showResetConfirmation) {
+            Button("Annuler", role: .cancel) {}
+            Button("Réinitialiser", role: .destructive) {
+                store.resetToDefaults()
+                selection = store.items.first?.id
+            }
+        } message: {
+            Text("Cette action remplace tous les presets actuels par les presets par défaut.")
+        }
+        .alert("Erreur presets", isPresented: Binding(
+            get: { store.lastErrorMessage != nil },
+            set: { if !$0 { store.lastErrorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(store.lastErrorMessage ?? "")
+        }
+        .alert("Information", isPresented: Binding(
+            get: { store.lastInfoMessage != nil },
+            set: { if !$0 { store.lastInfoMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(store.lastInfoMessage ?? "")
         }
         .onDisappear { store.save() }
     }
@@ -801,13 +936,207 @@ struct PresetsManagerView: View {
 
 // MARK: - Éditeur de preset
 struct PresetEditorView: View {
+    @EnvironmentObject var store: RenamePresetStore
     @Binding var preset: RenamePreset
     var applyAction: () -> Void
+    
+    private var validationIssues: [PresetValidationIssue] {
+        store.validationIssues(for: preset)
+    }
 
     var body: some View {
-        // <<< garde ici exactement le code que tu avais, inchangé >>>
-        // (il est long, donc je ne le recopie pas pour éviter une erreur)
-        VStack { /* ... ton contenu existant ... */ }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                GroupBox("Identité") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        TextField("Nom du preset", text: $preset.name)
+                            .textFieldStyle(.roundedBorder)
+                        TextField("Catégorie", text: $preset.category)
+                            .textFieldStyle(.roundedBorder)
+                        Text("Format preset: v\(preset.formatVersion)")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if !validationIssues.isEmpty {
+                    GroupBox("Validation") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(Array(validationIssues.enumerated()), id: \.offset) { _, issue in
+                                Label("\(issue.field): \(issue.message)", systemImage: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+                    }
+                }
+
+                GroupBox("Remplacer") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Activer", isOn: $preset.replace.enabled)
+                        TextField("Rechercher", text: $preset.replace.find).textFieldStyle(.roundedBorder)
+                        TextField("Remplacer par", text: $preset.replace.replace).textFieldStyle(.roundedBorder)
+                        Toggle("Regex", isOn: $preset.replace.regex).toggleStyle(.checkbox)
+                        Toggle("Sensible à la casse", isOn: $preset.replace.caseSensitive).toggleStyle(.checkbox)
+                    }
+                }
+
+                GroupBox("Retirer") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Activer", isOn: $preset.remove.enabled)
+                        HStack(spacing: 12) {
+                            Text("De")
+                            TextField("", text: optionalIntBinding($preset.remove.from)).frame(width: 70)
+                            Text("À")
+                            TextField("", text: optionalIntBinding($preset.remove.to)).frame(width: 70)
+                        }
+                        Toggle("Réduire espaces multiples", isOn: $preset.remove.collapseSpaces).toggleStyle(.checkbox)
+                        Toggle("Supprimer espaces début/fin", isOn: $preset.remove.trimWhitespace).toggleStyle(.checkbox)
+                    }
+                }
+
+                GroupBox("Ajouter") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Activer", isOn: $preset.add.enabled)
+                        Toggle("Préfixe", isOn: $preset.add.usePrefix).toggleStyle(.checkbox)
+                        TextField("Texte préfixe", text: $preset.add.prefix).textFieldStyle(.roundedBorder)
+                        Toggle("Suffixe", isOn: $preset.add.useSuffix).toggleStyle(.checkbox)
+                        TextField("Texte suffixe", text: $preset.add.suffix).textFieldStyle(.roundedBorder)
+                        TextField("Texte à insérer", text: $preset.add.insertText).textFieldStyle(.roundedBorder)
+                        Stepper("Position insertion: \(preset.add.insertIndex)", value: $preset.add.insertIndex, in: 1...9999)
+                    }
+                }
+
+                GroupBox("Date auto") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Activer", isOn: $preset.date.enabled)
+                        TextField("Format (ex: yyyy-MM-dd)", text: $preset.date.format).textFieldStyle(.roundedBorder)
+                        Toggle("Préfixe", isOn: $preset.date.usePrefix).toggleStyle(.checkbox)
+                        Toggle("À la position", isOn: $preset.date.useAtPosition).toggleStyle(.checkbox)
+                        Stepper("Index date: \(preset.date.atIndex)", value: $preset.date.atIndex, in: 1...9999)
+                        Toggle("Suffixe", isOn: $preset.date.useSuffix).toggleStyle(.checkbox)
+                    }
+                }
+
+                GroupBox("Numérotation") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Activer", isOn: $preset.num.enabled)
+                        Toggle("Numéro en préfixe", isOn: $preset.num.asPrefix).toggleStyle(.checkbox)
+                        Toggle("Seulement la sélection", isOn: $preset.num.onlySelection).toggleStyle(.checkbox)
+                        Stepper("Départ: \(preset.num.start)", value: $preset.num.start, in: -9999...9999)
+                        Stepper("Pas: \(preset.num.step)", value: $preset.num.step, in: 1...999)
+                        Stepper("Padding: \(preset.num.pad)", value: $preset.num.pad, in: 1...12)
+                        TextField("Séparateur", text: $preset.num.sep).textFieldStyle(.roundedBorder)
+                        TextField("Patron (#)", text: $preset.num.pattern).textFieldStyle(.roundedBorder)
+                    }
+                }
+
+                GroupBox("Casse + extension") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Changer la casse", isOn: $preset.casing.enabled)
+                        Picker("Style", selection: $preset.casing.style) {
+                            ForEach(CaseStyle.allCases) { style in
+                                Text(style.rawValue).tag(style)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+
+                        Toggle("Changer extension", isOn: $preset.ext.enabled)
+                        TextField("Nouvelle extension", text: $preset.ext.newExt).textFieldStyle(.roundedBorder)
+                        Picker("Casse extension", selection: $preset.ext.caseChange) {
+                            ForEach(ExtCase.allCases) { style in
+                                Text(style.rawValue).tag(style)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                    }
+                }
+
+                GroupBox("Dossier parent + spécial") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Ajouter dossier parent", isOn: $preset.folder.enabled)
+                        Toggle("En préfixe", isOn: $preset.folder.addParentAsPrefix).toggleStyle(.checkbox)
+                        TextField("Séparateur dossier", text: $preset.folder.sep).textFieldStyle(.roundedBorder)
+
+                        Toggle("Transformations spéciales", isOn: $preset.special.enabled)
+                        Toggle("Normaliser Unicode", isOn: $preset.special.normalizeUnicode).toggleStyle(.checkbox)
+                        Toggle("Supprimer accents", isOn: $preset.special.stripDiacritics).toggleStyle(.checkbox)
+                        Toggle("Remplacer \" - \" par « – »", isOn: $preset.special.dashToEnDash).toggleStyle(.checkbox)
+                        Toggle("Espaces vers _", isOn: $preset.special.spacesToUnderscore).toggleStyle(.checkbox)
+                    }
+                }
+
+                GroupBox("Filtres + destination") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Récursif", isOn: $preset.filters.recursive).toggleStyle(.checkbox)
+                        Toggle("Inclure cachés", isOn: $preset.filters.includeHidden).toggleStyle(.checkbox)
+                        TextField("Regex inclure", text: $preset.filters.includeRegex).textFieldStyle(.roundedBorder)
+                        TextField("Regex exclure", text: $preset.filters.excludeRegex).textFieldStyle(.roundedBorder)
+
+                        Toggle("Destination différente", isOn: $preset.destination.enabled).toggleStyle(.checkbox)
+                        if let url = preset.destination.url {
+                            Text(url.path)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        HStack {
+                            Button("Choisir destination…") {
+                                let panel = NSOpenPanel()
+                                panel.canChooseFiles = false
+                                panel.canChooseDirectories = true
+                                panel.allowsMultipleSelection = false
+                                panel.title = "Choisir un dossier de destination"
+                                if panel.runModal() == .OK {
+                                    preset.destination.url = panel.url
+                                }
+                            }
+                            Button("Effacer destination") {
+                                preset.destination.url = nil
+                            }
+                        }
+                        .disabled(!preset.destination.enabled)
+                        Toggle("Copier au lieu de déplacer", isOn: $preset.destination.copyInsteadOfMove)
+                            .toggleStyle(.checkbox)
+                            .disabled(!preset.destination.enabled)
+                    }
+                }
+
+                HStack {
+                    Button("Appliquer ce preset") {
+                        preset.formatVersion = RenamePreset.currentFormatVersion
+                        applyAction()
+                    }
+                    Button("Réinitialiser ce preset") {
+                        let preservedID = preset.id
+                        let preservedName = preset.name
+                        let preservedCategory = preset.category
+                        preset = RenamePreset(
+                            id: preservedID,
+                            formatVersion: RenamePreset.currentFormatVersion,
+                            name: preservedName,
+                            category: preservedCategory
+                        )
+                    }
+                    Spacer()
+                    Button("Enregistrer") {
+                        preset.formatVersion = RenamePreset.currentFormatVersion
+                        store.save()
+                    }
+                }
+            }
+            .padding(12)
+        }
+    }
+
+    private func optionalIntBinding(_ value: Binding<Int?>) -> Binding<String> {
+        Binding<String>(
+            get: { value.wrappedValue.map(String.init) ?? "" },
+            set: { raw in
+                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                value.wrappedValue = trimmed.isEmpty ? nil : Int(trimmed)
+            }
+        )
     }
 }
 
@@ -1158,6 +1487,30 @@ extension ContentView {
                 }
             }
         }
+        .overlay {
+            if vm.directoryURL == nil {
+                VStack(spacing: 8) {
+                    Image(systemName: "folder.badge.questionmark")
+                        .font(.system(size: 28))
+                        .foregroundStyle(.secondary)
+                    Text("Aucun dossier sélectionné")
+                        .font(.headline)
+                    Text("Commencez par cliquer sur « Choisir un dossier ».")
+                        .foregroundStyle(.secondary)
+                }
+                .padding()
+            } else if vm.entries.isEmpty && !vm.isLoading {
+                VStack(spacing: 8) {
+                    Image(systemName: "doc.text.magnifyingglass")
+                        .font(.system(size: 28))
+                        .foregroundStyle(.secondary)
+                    Text("Aucun fichier trouvé")
+                        .font(.headline)
+                    Text("Vérifiez les filtres ou choisissez un autre dossier.")
+                        .foregroundStyle(.secondary)
+                }
+                .padding()
+            }
+        }
     }
 }
-
