@@ -6,6 +6,12 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/fr/1.0.0/) et ce pr
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-03-11
+
+### Changed
+- Éditeur de presets simplifié avec une navigation par onglets (`Résumé`, `Noms`, `Numérotation`, `Fichiers`).
+- Extraction de `PresetEditorView` dans un fichier dédié pour clarifier la maintenance UI.
+
 ## [0.2.1] - 2026-03-11
 
 ### Added

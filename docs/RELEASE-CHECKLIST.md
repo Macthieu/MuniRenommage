@@ -1,6 +1,6 @@
 # RELEASE CHECKLIST - MuniRename
 
-Version cible: `v0.2.1`
+Version cible: `v0.2.2`
 
 ## Avant tag
 
@@ -17,9 +17,9 @@ Version cible: `v0.2.1`
 
 - [ ] Commit final sur `main`
 - [ ] Push `main`
-- [ ] Tag annoté `v0.2.1`
+- [ ] Tag annoté `v0.2.2`
 - [ ] Push du tag
-- [ ] Création release GitHub avec notes `docs/RELEASE-NOTES-v0.2.1.md`
+- [ ] Création release GitHub avec notes `docs/RELEASE-NOTES-v0.2.2.md`
 
 ## Après publication
 
