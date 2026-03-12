@@ -3,26 +3,26 @@ import AppKit
 
 enum MuniTheme {
     // MARK: Color tokens
-    static let backgroundTop = Color(nsColor: NSColor(calibratedWhite: 0.97, alpha: 1.0))
-    static let backgroundBottom = Color(nsColor: NSColor(calibratedWhite: 0.94, alpha: 1.0))
+    static let backgroundTop = Color(nsColor: .windowBackgroundColor)
+    static let backgroundBottom = Color(nsColor: .underPageBackgroundColor)
     static let windowBackground = LinearGradient(
         colors: [backgroundTop, backgroundBottom],
         startPoint: .top,
         endPoint: .bottom
     )
 
-    static let surfacePrimary = Color(nsColor: .windowBackgroundColor).opacity(0.94)
-    static let surfaceSecondary = Color(nsColor: .controlBackgroundColor).opacity(0.98)
-    static let surfaceTertiary = Color(nsColor: .controlBackgroundColor).opacity(0.90)
+    static let surfacePrimary = Color(nsColor: .controlBackgroundColor)
+    static let surfaceSecondary = Color(nsColor: .windowBackgroundColor)
+    static let surfaceTertiary = Color(nsColor: .textBackgroundColor)
 
-    static let borderLight = Color.black.opacity(0.09)
-    static let borderStrong = Color.black.opacity(0.14)
-    static let divider = Color.black.opacity(0.08)
-    static let splitDivider = Color.black.opacity(0.12)
+    static let borderLight = Color(nsColor: .separatorColor).opacity(0.55)
+    static let borderStrong = Color(nsColor: .separatorColor).opacity(0.85)
+    static let divider = Color(nsColor: .separatorColor).opacity(0.6)
+    static let splitDivider = Color(nsColor: .separatorColor).opacity(0.9)
 
-    static let accent = Color.accentColor
-    static let textPrimary = Color.primary
-    static let textSecondary = Color.secondary
+    static let accent = Color(nsColor: .controlAccentColor)
+    static let textPrimary = Color(nsColor: .labelColor)
+    static let textSecondary = Color(nsColor: .secondaryLabelColor)
     static let success = Color.green
     static let warning = Color.orange
     static let danger = Color.red
@@ -44,16 +44,16 @@ enum MuniTheme {
     }
 
     // MARK: shadows
-    static let shadowSoft = Color.black.opacity(0.05)
-    static let shadowActive = Color.black.opacity(0.10)
+    static let shadowSoft = Color.black.opacity(0.06)
+    static let shadowActive = Color.black.opacity(0.12)
 
     // MARK: compatibility aliases
-    static let panelFill = surfacePrimary
+    static let panelFill = surfaceSecondary
     static let panelStroke = borderLight
-    static let paneFill = surfaceSecondary
+    static let paneFill = surfacePrimary
     static let paneStroke = borderLight
     static let sectionActiveFill = accent.opacity(0.08)
-    static let sectionInactiveFill = surfaceSecondary
+    static let sectionInactiveFill = surfacePrimary
     static let sectionActiveStroke = accent.opacity(0.45)
     static let sectionInactiveStroke = borderLight
 }

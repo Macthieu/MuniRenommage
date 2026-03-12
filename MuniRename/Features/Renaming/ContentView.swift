@@ -490,7 +490,7 @@ struct SectionCard<Content: View>: View {
             VStack(alignment: .leading, spacing: MuniTheme.Spacing.sm) {
                 SectionHeader(title) {
                     StatusBadge(
-                        title: "",
+                        title: nil,
                         value: active ? "Actif" : "Inactif",
                         tone: active ? MuniTheme.accent : MuniTheme.textSecondary
                     )
@@ -630,22 +630,34 @@ struct ContentView: View {
 
     // SplitView
     private var mainLayout: some View {
-        HSplitView {
-            SidebarPanel {
-                rulesPane
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-            .frame(minWidth: 420, idealWidth: 560, maxWidth: .infinity, maxHeight: .infinity)
-            .layoutPriority(1)
+        GeometryReader { geo in
+            let useTwoRuleColumns = geo.size.width >= 1680
+            let leftIdeal = useTwoRuleColumns
+                ? max(620, geo.size.width * 0.56)
+                : max(460, geo.size.width * 0.44)
 
-            PreviewPane {
-                fileTable
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            HSplitView {
+                SidebarPanel {
+                    rulesPane(useTwoColumns: useTwoRuleColumns)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .frame(
+                    minWidth: 420,
+                    idealWidth: leftIdeal,
+                    maxWidth: useTwoRuleColumns ? geo.size.width * 0.72 : geo.size.width * 0.60,
+                    maxHeight: .infinity
+                )
+                .layoutPriority(1)
+
+                PreviewPane {
+                    fileTable
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .frame(minWidth: 430, idealWidth: geo.size.width - leftIdeal, maxWidth: .infinity, maxHeight: .infinity)
+                .layoutPriority(2)
             }
-            .frame(minWidth: 430, idealWidth: 700, maxWidth: .infinity, maxHeight: .infinity)
-            .layoutPriority(2)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay(alignment: .center) {
             if vm.isLoading {
                 ProgressView("Chargement…")
@@ -657,23 +669,21 @@ struct ContentView: View {
     }
 
     // Panneau regles adaptatif
-    private var rulesPane: some View {
-        GeometryReader { geo in
-            ScrollView {
-                if geo.size.width >= 1120 {
-                    HStack(alignment: .top, spacing: MuniTheme.Spacing.md) {
-                        rulesPrimaryColumn
-                        rulesSecondaryColumn
-                    }
-                    .padding(MuniTheme.Spacing.sm)
-                } else {
-                    rulesSingleColumn
-                        .padding(MuniTheme.Spacing.sm)
+    private func rulesPane(useTwoColumns: Bool) -> some View {
+        ScrollView {
+            if useTwoColumns {
+                HStack(alignment: .top, spacing: MuniTheme.Spacing.md) {
+                    rulesPrimaryColumn
+                    rulesSecondaryColumn
                 }
+                .padding(MuniTheme.Spacing.sm)
+            } else {
+                rulesSingleColumn
+                    .padding(MuniTheme.Spacing.sm)
             }
-            .clipped()
-            .modifier(PreviewRecomputeModifier(vm: vm))
         }
+        .clipped()
+        .modifier(PreviewRecomputeModifier(vm: vm))
     }
 
     private var rulesSingleColumn: some View {
@@ -733,10 +743,10 @@ struct ContentView: View {
                     Spacer()
                     HStack(spacing: 8) {
                         StatusBadge(title: "Fichiers", value: "\(vm.entries.count)")
-                        StatusBadge(title: "Selection", value: "\(vm.selection.count)")
+                        StatusBadge(title: "Sélection", value: "\(vm.selection.count)")
                         StatusBadge(
-                            title: "Etat",
-                            value: vm.isLoading ? "Chargement" : "Pret",
+                            title: "État",
+                            value: vm.isLoading ? "Chargement" : "Prêt",
                             tone: vm.isLoading ? MuniTheme.accent : MuniTheme.textPrimary
                         )
                     }
@@ -749,10 +759,10 @@ struct ContentView: View {
                     if let d = vm.directoryURL {
                         pathPill(d.path)
                     } else {
-                        pathPill("Aucun dossier selectionne")
+                        pathPill("Aucun dossier sélectionné")
                     }
                     Spacer()
-                    ToolbarButton(title: "Rafraichir", systemImage: "arrow.clockwise") {
+                    ToolbarButton(title: "Rafraîchir", systemImage: "arrow.clockwise") {
                         vm.loadEntries()
                     }
                     .keyboardShortcut("r")
@@ -767,7 +777,7 @@ struct ContentView: View {
                             .buttonStyle(MuniSecondaryButtonStyle())
                             .disabled(vm.selection.isEmpty)
 
-                        Toggle("Apercu seulement selection", isOn: $vm.previewOnlySelection)
+                        Toggle("Aperçu seulement sélection", isOn: $vm.previewOnlySelection)
                             .toggleStyle(.checkbox)
                             .disabled(vm.entries.isEmpty)
 

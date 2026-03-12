@@ -102,15 +102,17 @@ struct SecondaryActionButton: View {
 }
 
 struct StatusBadge: View {
-    let title: String
+    var title: String? = nil
     let value: String
     var tone: Color = MuniTheme.textPrimary
 
     var body: some View {
         HStack(spacing: 6) {
-            Text(title)
-                .font(.caption2)
-                .foregroundStyle(MuniTheme.textSecondary)
+            if let title, !title.isEmpty {
+                Text(title)
+                    .font(.caption2)
+                    .foregroundStyle(MuniTheme.textSecondary)
+            }
             Text(value)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(tone)
