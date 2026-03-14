@@ -21,7 +21,7 @@ let package = Package(
         )
     ],
     dependencies: [
-        .package(url: "https://github.com/Macthieu/OrchivisteKit.git", branch: "main")
+        .package(url: "https://github.com/Macthieu/OrchivisteKit.git", exact: "0.2.0")
     ],
     targets: [
         .target(
