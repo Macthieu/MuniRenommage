@@ -7,14 +7,21 @@ on:
 
 jobs:
   core-build-and-smoke-tests:
-    runs-on: macos-latest
+    runs-on: macos-14
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: Show Swift version
-        run: swift --version
+      - name: Verify Swift 6 toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift --version
+          if ! swift --version | grep -E "Swift version 6\\." >/dev/null; then
+            echo "Swift 6.x is required for CI." >&2
+            exit 1
+          fi
 
       - name: Build Swift package
         run: swift build
@@ -26,14 +33,24 @@ jobs:
         run: swift run munirename-cli --help
 
   xcode-app-build:
-    runs-on: macos-latest
+    runs-on: macos-14
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Show Xcode version
         run: xcodebuild -version
+
+      - name: Verify Swift 6 toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift --version
+          if ! swift --version | grep -E "Swift version 6\\." >/dev/null; then
+            echo "Swift 6.x is required for CI." >&2
+            exit 1
+          fi
 
       - name: Build macOS app target
         run: ./scripts/xcode_build.sh
