@@ -12,8 +12,14 @@ if [[ ! -d "$PROJECT" ]]; then
   exit 1
 fi
 
-if [[ -d "/Applications/Xcode.app/Contents/Developer" ]]; then
-  export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
+# Respect any Xcode already selected by CI (xcode-select or DEVELOPER_DIR).
+if [[ -z "${DEVELOPER_DIR:-}" ]]; then
+  ACTIVE_DEV_DIR="$(xcode-select -p)"
+  if [[ "$ACTIVE_DEV_DIR" == "/Library/Developer/CommandLineTools" ]] && [[ -d "/Applications/Xcode.app/Contents/Developer" ]]; then
+    export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
+  else
+    export DEVELOPER_DIR="$ACTIVE_DEV_DIR"
+  fi
 fi
 
 echo "Using DEVELOPER_DIR=${DEVELOPER_DIR:-$(xcode-select -p)}"
