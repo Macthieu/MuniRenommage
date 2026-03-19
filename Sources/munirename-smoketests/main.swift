@@ -41,6 +41,58 @@ func makePresetFile(in directory: URL, prefix: String = "PFX_") throws -> URL {
     return presetURL
 }
 
+func makeMuniReglesBundleFile(in directory: URL, ruleID: String = "rule-default") throws -> URL {
+    let bundleURL = directory.appendingPathComponent("muniregles-bundle.json")
+    let payload = """
+    {
+      "manifest": {
+        "bundle_version": "1.0",
+        "module_version": "0.1.0",
+        "generated_at": "2026-03-19T00:00:00Z",
+        "source_checksums": {
+          "naming_and_routing_rules": "abc123"
+        }
+      },
+      "classification_plan": {
+        "taxonomy_id": "muni-demo",
+        "version": "2026.1",
+        "entries": [
+          {
+            "code": "ADM-100",
+            "label": "Administration generale",
+            "path": "administration/generale"
+          }
+        ]
+      },
+      "naming_and_routing_rules": {
+        "version": "2026.1",
+        "naming_rules": [
+          {
+            "id": "\(ruleID)",
+            "label": "Regle de nommage de demo",
+            "template": "{class_code}-{date}-{title}"
+          }
+        ],
+        "routing_rules": [
+          {
+            "id": "routing-default",
+            "class_code": "ADM-100",
+            "destination_template": "administration/{class_code}"
+          }
+        ]
+      },
+      "renaming_guide": {
+        "title": "Guide",
+        "conventions": ["Exemple"],
+        "examples": [{"input": "doc", "output": "ADM-100_2026-03-19_doc"}]
+      }
+    }
+    """
+
+    try payload.write(to: bundleURL, atomically: true, encoding: .utf8)
+    return bundleURL
+}
+
 var runner = SmokeTestRunner()
 
 runner.run("Conserve l'extension") {
@@ -226,6 +278,92 @@ runner.run("Canonical preview retourne un resultat canonique") {
     try expect(result.status == .succeeded, "Preview canonique devrait etre en succeeded")
     try expect(result.errors.isEmpty, "Preview canonique ne doit pas produire d'erreurs")
     try expect(result.metadata["action"] == .string("preview"), "Metadata action invalide")
+}
+
+runner.run("Canonical preview sans bundle expose fallback_local") {
+    let tempDir = try makeTempDir(prefix: "munirename-canonical-no-bundle-")
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let sourceFile = tempDir.appendingPathComponent("sample.txt")
+    try "TXT".data(using: .utf8)?.write(to: sourceFile)
+    let presetURL = try makePresetFile(in: tempDir, prefix: "PRE_")
+
+    let request = ToolRequest(
+        requestID: "req-trace-no-bundle",
+        tool: "MuniRenommage",
+        action: "preview",
+        inputArtifacts: [],
+        parameters: [
+            "preset_path": .string(presetURL.path),
+            "directory_path": .string(tempDir.path)
+        ]
+    )
+
+    let result = CanonicalRunAdapter.execute(request: request)
+    try expect(result.status == .succeeded, "Preview canonique devrait etre en succeeded")
+    try expect(result.metadata["regles_source"] == .string("fallback_local"), "Source regles attendue: fallback_local")
+}
+
+runner.run("Canonical preview lit trace MuniRegles bundle valide") {
+    let tempDir = try makeTempDir(prefix: "munirename-canonical-valid-bundle-")
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let sourceFile = tempDir.appendingPathComponent("sample.txt")
+    try "TXT".data(using: .utf8)?.write(to: sourceFile)
+    let presetURL = try makePresetFile(in: tempDir, prefix: "PRE_")
+    let bundleURL = try makeMuniReglesBundleFile(in: tempDir, ruleID: "rule-qa")
+
+    let request = ToolRequest(
+        requestID: "req-trace-valid-bundle",
+        tool: "MuniRenommage",
+        action: "preview",
+        inputArtifacts: [],
+        parameters: [
+            "preset_path": .string(presetURL.path),
+            "directory_path": .string(tempDir.path),
+            "regles_bundle_path": .string(bundleURL.path),
+            "regles_naming_rule_id": .string("rule-qa")
+        ]
+    )
+
+    let result = CanonicalRunAdapter.execute(request: request)
+    try expect(result.status == .succeeded, "Preview canonique devrait etre en succeeded")
+    try expect(result.metadata["regles_source"] == .string("muniregles_bundle"), "Source regles attendue: muniregles_bundle")
+    try expect(result.metadata["regles_bundle_version"] == .string("1.0"), "Version de bundle attendue")
+    try expect(result.metadata["regles_module_version"] == .string("0.1.0"), "Version module attendue")
+    try expect(result.metadata["regles_rule_id"] == .string("rule-qa"), "Rule ID de trace attendu")
+}
+
+runner.run("Canonical preview bundle illisible conserve fallback avec raison") {
+    let tempDir = try makeTempDir(prefix: "munirename-canonical-invalid-bundle-")
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let sourceFile = tempDir.appendingPathComponent("sample.txt")
+    try "TXT".data(using: .utf8)?.write(to: sourceFile)
+    let presetURL = try makePresetFile(in: tempDir, prefix: "PRE_")
+
+    let missingBundlePath = tempDir.appendingPathComponent("missing-bundle.json").path
+    let request = ToolRequest(
+        requestID: "req-trace-invalid-bundle",
+        tool: "MuniRenommage",
+        action: "preview",
+        inputArtifacts: [],
+        parameters: [
+            "preset_path": .string(presetURL.path),
+            "directory_path": .string(tempDir.path),
+            "regles_bundle_path": .string(missingBundlePath),
+            "regles_naming_rule_id": .string("rule-missing")
+        ]
+    )
+
+    let result = CanonicalRunAdapter.execute(request: request)
+    try expect(result.status == .succeeded, "Preview canonique devrait rester en succeeded")
+    try expect(result.metadata["regles_source"] == .string("fallback_local"), "Source regles attendue: fallback_local")
+    try expect(result.metadata["regles_rule_id"] == .string("rule-missing"), "Rule ID fourni doit etre trace")
+    try expect(
+        result.metadata["regles_fallback_reason"] == .string("bundle_unreadable_or_invalid"),
+        "Raison de fallback attendue"
+    )
 }
 
 if runner.failures.isEmpty {
