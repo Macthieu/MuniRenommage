@@ -70,6 +70,7 @@ private struct MuniReglesBundleManifestPayload: Codable, Sendable {
 
 private struct MuniReglesNamingRulePayload: Codable, Sendable {
     let id: String
+    let template: String
 }
 
 private struct MuniReglesNamingAndRoutingRulesPayload: Codable, Sendable {
@@ -96,11 +97,13 @@ private struct MuniReglesTraceContext: Sendable {
     let moduleVersion: String?
     let ruleID: String?
     let fallbackReason: String?
+    let applyRuleRequested: Bool
 }
 
 private struct CanonicalExecutionContext: Sendable {
     let action: CanonicalAction
     let preset: RenamePreset
+    let effectiveRules: RenameRules
     let directory: URL?
     let recursive: Bool
     let includeHidden: Bool
@@ -208,7 +211,7 @@ public enum CanonicalRunAdapter {
             throw CanonicalRunAdapterError.missingParameter("directory_path")
         }
 
-        var effectiveRules = context.preset.rules
+        var effectiveRules = context.effectiveRules
         if context.recursive { effectiveRules.filters.recursive = true }
         if context.includeHidden { effectiveRules.filters.includeHidden = true }
 
@@ -301,7 +304,6 @@ public enum CanonicalRunAdapter {
 
     private static func parseContext(from request: ToolRequest) throws -> CanonicalExecutionContext {
         let action = try parseAction(request.action)
-        let reglesTrace = try resolveMuniReglesTrace(from: request)
 
         let presetPath = try requiredStringParameter("preset_path", in: request)
         let presetURL = URL(fileURLWithPath: presetPath)
@@ -331,15 +333,18 @@ public enum CanonicalRunAdapter {
             throw CanonicalRunAdapterError.missingParameter("directory_path")
         }
 
+        let reglesResolution = try resolveMuniReglesTrace(from: request, baseRules: preset.rules)
+
         return CanonicalExecutionContext(
             action: action,
             preset: preset,
+            effectiveRules: reglesResolution.effectiveRules,
             directory: directoryURL,
             recursive: recursive,
             includeHidden: includeHidden,
             dryRun: dryRun,
             confirmApply: confirmApply,
-            reglesTrace: reglesTrace
+            reglesTrace: reglesResolution.trace
         )
     }
 
@@ -412,57 +417,149 @@ public enum CanonicalRunAdapter {
         }
     }
 
-    private static func resolveMuniReglesTrace(from request: ToolRequest) throws -> MuniReglesTraceContext {
+    private static func resolveMuniReglesTrace(
+        from request: ToolRequest,
+        baseRules: RenameRules
+    ) throws -> (trace: MuniReglesTraceContext, effectiveRules: RenameRules) {
+        let applyRule = try optionalBoolParameter("regles_apply_rule", in: request) ?? false
         let requestedRuleID = try optionalRawStringParameter("regles_naming_rule_id", in: request)
+        let requestedClassCode = try optionalRawStringParameter("regles_class_code", in: request)
+            ?? (try optionalRawStringParameter("class_code", in: request))
         let bundlePath = try resolveMuniReglesBundlePath(from: request)
 
         guard let bundlePath else {
-            return MuniReglesTraceContext(
-                source: "fallback_local",
-                bundleVersion: nil,
-                moduleVersion: nil,
-                ruleID: requestedRuleID,
-                fallbackReason: nil
+            return (
+                MuniReglesTraceContext(
+                    source: "fallback_local",
+                    bundleVersion: nil,
+                    moduleVersion: nil,
+                    ruleID: requestedRuleID,
+                    fallbackReason: applyRule ? "bundle_not_provided" : nil,
+                    applyRuleRequested: applyRule
+                ),
+                baseRules
             )
         }
 
         guard let bundle = try? parseMuniReglesBundle(fromPath: bundlePath) else {
-            return MuniReglesTraceContext(
-                source: "fallback_local",
-                bundleVersion: nil,
-                moduleVersion: nil,
-                ruleID: requestedRuleID,
-                fallbackReason: "bundle_unreadable_or_invalid"
+            return (
+                MuniReglesTraceContext(
+                    source: "fallback_local",
+                    bundleVersion: nil,
+                    moduleVersion: nil,
+                    ruleID: requestedRuleID,
+                    fallbackReason: "bundle_unreadable_or_invalid",
+                    applyRuleRequested: applyRule
+                ),
+                baseRules
             )
         }
 
-        let namingRuleIDs = Set(bundle.namingAndRoutingRules.namingRules.map { $0.id })
-        guard !namingRuleIDs.isEmpty else {
-            return MuniReglesTraceContext(
-                source: "fallback_local",
-                bundleVersion: normalizeNonEmpty(bundle.manifest.bundleVersion),
-                moduleVersion: normalizeNonEmpty(bundle.manifest.moduleVersion),
-                ruleID: requestedRuleID,
-                fallbackReason: "bundle_contains_no_naming_rules"
+        let bundleVersion = normalizeNonEmpty(bundle.manifest.bundleVersion)
+        let moduleVersion = normalizeNonEmpty(bundle.manifest.moduleVersion)
+        let namingRules = bundle.namingAndRoutingRules.namingRules
+
+        guard !namingRules.isEmpty else {
+            return (
+                MuniReglesTraceContext(
+                    source: "fallback_local",
+                    bundleVersion: bundleVersion,
+                    moduleVersion: moduleVersion,
+                    ruleID: requestedRuleID,
+                    fallbackReason: "bundle_contains_no_naming_rules",
+                    applyRuleRequested: applyRule
+                ),
+                baseRules
             )
         }
 
-        if let requestedRuleID, !namingRuleIDs.contains(requestedRuleID) {
-            return MuniReglesTraceContext(
-                source: "fallback_local",
-                bundleVersion: normalizeNonEmpty(bundle.manifest.bundleVersion),
-                moduleVersion: normalizeNonEmpty(bundle.manifest.moduleVersion),
-                ruleID: requestedRuleID,
-                fallbackReason: "rule_not_found_in_bundle"
+        guard let requestedRuleID, !requestedRuleID.isEmpty else {
+            let fallbackReason = applyRule ? "regles_naming_rule_id_missing" : nil
+            return (
+                MuniReglesTraceContext(
+                    source: "fallback_local",
+                    bundleVersion: bundleVersion,
+                    moduleVersion: moduleVersion,
+                    ruleID: nil,
+                    fallbackReason: fallbackReason,
+                    applyRuleRequested: applyRule
+                ),
+                baseRules
             )
         }
 
-        return MuniReglesTraceContext(
-            source: "muniregles_bundle",
-            bundleVersion: normalizeNonEmpty(bundle.manifest.bundleVersion),
-            moduleVersion: normalizeNonEmpty(bundle.manifest.moduleVersion),
-            ruleID: requestedRuleID,
-            fallbackReason: nil
+        guard let selectedRule = namingRules.first(where: { $0.id == requestedRuleID }) else {
+            return (
+                MuniReglesTraceContext(
+                    source: "fallback_local",
+                    bundleVersion: bundleVersion,
+                    moduleVersion: moduleVersion,
+                    ruleID: requestedRuleID,
+                    fallbackReason: "rule_not_found_in_bundle",
+                    applyRuleRequested: applyRule
+                ),
+                baseRules
+            )
+        }
+
+        guard applyRule else {
+            return (
+                MuniReglesTraceContext(
+                    source: "fallback_local",
+                    bundleVersion: bundleVersion,
+                    moduleVersion: moduleVersion,
+                    ruleID: requestedRuleID,
+                    fallbackReason: "regles_apply_rule_disabled",
+                    applyRuleRequested: false
+                ),
+                baseRules
+            )
+        }
+
+        guard let classCode = normalizeNonEmpty(requestedClassCode) else {
+            return (
+                MuniReglesTraceContext(
+                    source: "fallback_local",
+                    bundleVersion: bundleVersion,
+                    moduleVersion: moduleVersion,
+                    ruleID: requestedRuleID,
+                    fallbackReason: "regles_class_code_missing",
+                    applyRuleRequested: true
+                ),
+                baseRules
+            )
+        }
+
+        let normalizedTemplate = normalizeTemplate(selectedRule.template)
+        var effectiveRules = baseRules
+        guard applySupportedMuniReglesTemplate(
+            normalizedTemplate,
+            classCode: classCode,
+            to: &effectiveRules
+        ) else {
+            return (
+                MuniReglesTraceContext(
+                    source: "fallback_local",
+                    bundleVersion: bundleVersion,
+                    moduleVersion: moduleVersion,
+                    ruleID: requestedRuleID,
+                    fallbackReason: "template_not_supported",
+                    applyRuleRequested: true
+                ),
+                baseRules
+            )
+        }
+
+        return (
+            MuniReglesTraceContext(
+                source: "muniregles_bundle",
+                bundleVersion: bundleVersion,
+                moduleVersion: moduleVersion,
+                ruleID: requestedRuleID,
+                fallbackReason: nil,
+                applyRuleRequested: true
+            ),
+            effectiveRules
         )
     }
 
@@ -498,6 +595,73 @@ public enum CanonicalRunAdapter {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    private static func normalizeTemplate(_ template: String) -> String {
+        template
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "")
+    }
+
+    private static func applySupportedMuniReglesTemplate(
+        _ template: String,
+        classCode: String,
+        to rules: inout RenameRules
+    ) -> Bool {
+        let normalizedClassCode = classCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedClassCode.isEmpty else {
+            return false
+        }
+
+        switch template {
+        case "{class_code}-{subject}":
+            rules.add = AddRule(
+                enabled: true,
+                usePrefix: true,
+                prefix: "\(normalizedClassCode)-",
+                useSuffix: false,
+                suffix: "",
+                insertText: "",
+                insertIndex: 1
+            )
+            rules.numbering = NumberingRule(
+                enabled: false,
+                asPrefix: false,
+                start: 1,
+                step: 1,
+                pad: 3,
+                separator: "-",
+                onlySelection: false,
+                pattern: ""
+            )
+            return true
+
+        case "{class_code}-{subject}-{seq}":
+            rules.add = AddRule(
+                enabled: true,
+                usePrefix: true,
+                prefix: "\(normalizedClassCode)-",
+                useSuffix: false,
+                suffix: "",
+                insertText: "",
+                insertIndex: 1
+            )
+            rules.numbering = NumberingRule(
+                enabled: true,
+                asPrefix: false,
+                start: 1,
+                step: 1,
+                pad: 3,
+                separator: "-",
+                onlySelection: false,
+                pattern: ""
+            )
+            return true
+
+        default:
+            return false
+        }
+    }
+
     private static func withReglesTraceMetadata(
         _ metadata: [String: JSONValue],
         context: CanonicalExecutionContext
@@ -517,6 +681,7 @@ public enum CanonicalRunAdapter {
         if let fallbackReason = context.reglesTrace.fallbackReason {
             merged["regles_fallback_reason"] = .string(fallbackReason)
         }
+        merged["regles_apply_rule"] = .bool(context.reglesTrace.applyRuleRequested)
 
         return merged
     }
