@@ -41,7 +41,11 @@ func makePresetFile(in directory: URL, prefix: String = "PFX_") throws -> URL {
     return presetURL
 }
 
-func makeMuniReglesBundleFile(in directory: URL, ruleID: String = "rule-default") throws -> URL {
+func makeMuniReglesBundleFile(
+    in directory: URL,
+    ruleID: String = "rule-default",
+    template: String = "{class_code}-{subject}"
+) throws -> URL {
     let bundleURL = directory.appendingPathComponent("muniregles-bundle.json")
     let payload = """
     {
@@ -70,7 +74,7 @@ func makeMuniReglesBundleFile(in directory: URL, ruleID: String = "rule-default"
           {
             "id": "\(ruleID)",
             "label": "Regle de nommage de demo",
-            "template": "{class_code}-{date}-{title}"
+            "template": "\(template)"
           }
         ],
         "routing_rules": [
@@ -304,7 +308,7 @@ runner.run("Canonical preview sans bundle expose fallback_local") {
     try expect(result.metadata["regles_source"] == .string("fallback_local"), "Source regles attendue: fallback_local")
 }
 
-runner.run("Canonical preview lit trace MuniRegles bundle valide") {
+runner.run("Canonical preview bundle valide sans regles_apply_rule reste en fallback") {
     let tempDir = try makeTempDir(prefix: "munirename-canonical-valid-bundle-")
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
@@ -328,10 +332,123 @@ runner.run("Canonical preview lit trace MuniRegles bundle valide") {
 
     let result = CanonicalRunAdapter.execute(request: request)
     try expect(result.status == .succeeded, "Preview canonique devrait etre en succeeded")
-    try expect(result.metadata["regles_source"] == .string("muniregles_bundle"), "Source regles attendue: muniregles_bundle")
+    try expect(result.metadata["regles_source"] == .string("fallback_local"), "Source regles attendue: fallback_local")
     try expect(result.metadata["regles_bundle_version"] == .string("1.0"), "Version de bundle attendue")
     try expect(result.metadata["regles_module_version"] == .string("0.1.0"), "Version module attendue")
     try expect(result.metadata["regles_rule_id"] == .string("rule-qa"), "Rule ID de trace attendu")
+    try expect(
+        result.metadata["regles_fallback_reason"] == .string("regles_apply_rule_disabled"),
+        "Raison de fallback attendue"
+    )
+}
+
+runner.run("Canonical preview applique une regle MuniRegles supportee") {
+    let tempDir = try makeTempDir(prefix: "munirename-canonical-supported-template-")
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let sourceFile = tempDir.appendingPathComponent("sample.txt")
+    try "TXT".data(using: .utf8)?.write(to: sourceFile)
+    let presetURL = try makePresetFile(in: tempDir, prefix: "PRE_")
+    let bundleURL = try makeMuniReglesBundleFile(
+        in: tempDir,
+        ruleID: "rule-supported",
+        template: "{class_code}-{subject}"
+    )
+
+    let request = ToolRequest(
+        requestID: "req-trace-supported-template",
+        tool: "MuniRenommage",
+        action: "preview",
+        inputArtifacts: [],
+        parameters: [
+            "preset_path": .string(presetURL.path),
+            "directory_path": .string(tempDir.path),
+            "regles_bundle_path": .string(bundleURL.path),
+            "regles_naming_rule_id": .string("rule-supported"),
+            "regles_apply_rule": .bool(true),
+            "regles_class_code": .string("ADM-100")
+        ]
+    )
+
+    let result = CanonicalRunAdapter.execute(request: request)
+    try expect(result.status == .succeeded, "Preview canonique devrait etre en succeeded")
+    try expect(result.metadata["regles_source"] == .string("muniregles_bundle"), "Source regles attendue: muniregles_bundle")
+    try expect(result.metadata["regles_bundle_version"] == .string("1.0"), "Version de bundle attendue")
+    try expect(result.metadata["regles_module_version"] == .string("0.1.0"), "Version module attendue")
+    try expect(result.metadata["regles_rule_id"] == .string("rule-supported"), "Rule ID de trace attendu")
+    try expect(result.metadata["regles_fallback_reason"] == nil, "Aucune raison de fallback attendue")
+}
+
+runner.run("Canonical preview applique une regle MuniRegles supportee avec seq") {
+    let tempDir = try makeTempDir(prefix: "munirename-canonical-supported-template-seq-")
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let sourceFile = tempDir.appendingPathComponent("sample.txt")
+    try "TXT".data(using: .utf8)?.write(to: sourceFile)
+    let presetURL = try makePresetFile(in: tempDir, prefix: "PRE_")
+    let bundleURL = try makeMuniReglesBundleFile(
+        in: tempDir,
+        ruleID: "rule-supported-seq",
+        template: "{class_code}-{subject}-{seq}"
+    )
+
+    let request = ToolRequest(
+        requestID: "req-trace-supported-template-seq",
+        tool: "MuniRenommage",
+        action: "preview",
+        inputArtifacts: [],
+        parameters: [
+            "preset_path": .string(presetURL.path),
+            "directory_path": .string(tempDir.path),
+            "regles_bundle_path": .string(bundleURL.path),
+            "regles_naming_rule_id": .string("rule-supported-seq"),
+            "regles_apply_rule": .bool(true),
+            "regles_class_code": .string("ADM-100")
+        ]
+    )
+
+    let result = CanonicalRunAdapter.execute(request: request)
+    try expect(result.status == .succeeded, "Preview canonique devrait etre en succeeded")
+    try expect(result.metadata["regles_source"] == .string("muniregles_bundle"), "Source regles attendue: muniregles_bundle")
+    try expect(result.metadata["regles_fallback_reason"] == nil, "Aucune raison de fallback attendue")
+}
+
+runner.run("Canonical preview avec template non supporte conserve fallback") {
+    let tempDir = try makeTempDir(prefix: "munirename-canonical-unsupported-template-")
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let sourceFile = tempDir.appendingPathComponent("sample.txt")
+    try "TXT".data(using: .utf8)?.write(to: sourceFile)
+    let presetURL = try makePresetFile(in: tempDir, prefix: "PRE_")
+    let bundleURL = try makeMuniReglesBundleFile(
+        in: tempDir,
+        ruleID: "rule-unsupported",
+        template: "{class_code}-{date}-{subject}"
+    )
+
+    let request = ToolRequest(
+        requestID: "req-trace-unsupported-template",
+        tool: "MuniRenommage",
+        action: "preview",
+        inputArtifacts: [],
+        parameters: [
+            "preset_path": .string(presetURL.path),
+            "directory_path": .string(tempDir.path),
+            "regles_bundle_path": .string(bundleURL.path),
+            "regles_naming_rule_id": .string("rule-unsupported"),
+            "regles_apply_rule": .bool(true),
+            "regles_class_code": .string("ADM-100")
+        ]
+    )
+
+    let result = CanonicalRunAdapter.execute(request: request)
+    try expect(result.status == .succeeded, "Preview canonique devrait rester en succeeded")
+    try expect(result.metadata["regles_source"] == .string("fallback_local"), "Source regles attendue: fallback_local")
+    try expect(result.metadata["regles_rule_id"] == .string("rule-unsupported"), "Rule ID fourni doit etre trace")
+    try expect(
+        result.metadata["regles_fallback_reason"] == .string("template_not_supported"),
+        "Raison de fallback attendue"
+    )
 }
 
 runner.run("Canonical preview bundle illisible conserve fallback avec raison") {
