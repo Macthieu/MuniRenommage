@@ -41,6 +41,14 @@ func makePresetFile(in directory: URL, prefix: String = "PFX_") throws -> URL {
     return presetURL
 }
 
+func makeNeutralPresetFile(in directory: URL) throws -> URL {
+    let preset = RenamePreset(name: "Canonical", category: "QA")
+    let data = try PresetCodec.encodePresetDocument(preset)
+    let presetURL = directory.appendingPathComponent("preset-neutral.json")
+    try data.write(to: presetURL)
+    return presetURL
+}
+
 func makeMuniReglesBundleFile(
     in directory: URL,
     ruleID: String = "rule-default",
@@ -95,6 +103,35 @@ func makeMuniReglesBundleFile(
 
     try payload.write(to: bundleURL, atomically: true, encoding: .utf8)
     return bundleURL
+}
+
+func makeDocumentMetadataFile(
+    in directory: URL,
+    entries: [(sourceFile: String, documentType: String, documentSubject: String, documentDate: String)]
+) throws -> URL {
+    let metadataURL = directory.appendingPathComponent("document-metadata.json")
+    let documents = entries.map { entry in
+        """
+        {
+          "source_file": "\(entry.sourceFile)",
+          "document_type": "\(entry.documentType)",
+          "document_subject": "\(entry.documentSubject)",
+          "document_date": "\(entry.documentDate)"
+        }
+        """
+    }.joined(separator: ",\n")
+
+    let payload = """
+    {
+      "schema_version": "1.0",
+      "documents": [
+    \(documents)
+      ]
+    }
+    """
+
+    try payload.write(to: metadataURL, atomically: true, encoding: .utf8)
+    return metadataURL
 }
 
 var runner = SmokeTestRunner()
@@ -411,6 +448,112 @@ runner.run("Canonical preview applique une regle MuniRegles supportee avec seq")
     try expect(result.status == .succeeded, "Preview canonique devrait etre en succeeded")
     try expect(result.metadata["regles_source"] == .string("muniregles_bundle"), "Source regles attendue: muniregles_bundle")
     try expect(result.metadata["regles_fallback_reason"] == nil, "Aucune raison de fallback attendue")
+}
+
+runner.run("Canonical preview template documentaire sans metadata conserve fallback") {
+    let tempDir = try makeTempDir(prefix: "munirename-canonical-document-template-no-metadata-")
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let sourceFile = tempDir.appendingPathComponent("doc1.pdf")
+    try "PDF".data(using: .utf8)?.write(to: sourceFile)
+    let presetURL = try makeNeutralPresetFile(in: tempDir)
+    let bundleURL = try makeMuniReglesBundleFile(
+        in: tempDir,
+        ruleID: "rule-document-template",
+        template: "{document_type} – {document_subject} – {document_date}"
+    )
+
+    let request = ToolRequest(
+        requestID: "req-trace-document-template-no-metadata",
+        tool: "MuniRenommage",
+        action: "preview",
+        inputArtifacts: [],
+        parameters: [
+            "preset_path": .string(presetURL.path),
+            "directory_path": .string(tempDir.path),
+            "regles_bundle_path": .string(bundleURL.path),
+            "regles_naming_rule_id": .string("rule-document-template"),
+            "regles_apply_rule": .bool(true)
+        ]
+    )
+
+    let result = CanonicalRunAdapter.execute(request: request)
+    try expect(result.status == .succeeded, "Preview canonique devrait rester en succeeded")
+    try expect(result.metadata["regles_source"] == .string("fallback_local"), "Source regles attendue: fallback_local")
+    try expect(
+        result.metadata["regles_fallback_reason"] == .string("document_metadata_not_provided"),
+        "Raison de fallback attendue"
+    )
+}
+
+runner.run("Canonical apply template documentaire produit les 2 noms exacts") {
+    let tempDir = try makeTempDir(prefix: "munirename-canonical-document-template-exact-")
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let sourceFile1 = tempDir.appendingPathComponent("doc1.pdf")
+    let sourceFile2 = tempDir.appendingPathComponent("doc2.pdf")
+    try "PDF1".data(using: .utf8)?.write(to: sourceFile1)
+    try "PDF2".data(using: .utf8)?.write(to: sourceFile2)
+
+    let presetURL = try makeNeutralPresetFile(in: tempDir)
+    let bundleURL = try makeMuniReglesBundleFile(
+        in: tempDir,
+        ruleID: "rule-document-template",
+        template: "{document_type} – {document_subject} – {document_date}"
+    )
+    let metadataURL = try makeDocumentMetadataFile(
+        in: tempDir,
+        entries: [
+            (
+                sourceFile: "doc1.pdf",
+                documentType: "Résolution NO 2025-54",
+                documentSubject: "Extension du délai de construction pour Plantation d’arbres M.M. inc.",
+                documentDate: "2025-02-03"
+            ),
+            (
+                sourceFile: "doc2.pdf",
+                documentType: "Ordre du jour",
+                documentSubject: "Séance du conseil",
+                documentDate: "2025-03-17"
+            )
+        ]
+    )
+
+    let request = ToolRequest(
+        requestID: "req-document-template-exact",
+        tool: "MuniRenommage",
+        action: "apply",
+        inputArtifacts: [],
+        parameters: [
+            "preset_path": .string(presetURL.path),
+            "directory_path": .string(tempDir.path),
+            "regles_bundle_path": .string(bundleURL.path),
+            "regles_naming_rule_id": .string("rule-document-template"),
+            "regles_apply_rule": .bool(true),
+            "document_metadata_path": .string(metadataURL.path),
+            "dry_run": .bool(false),
+            "confirm_apply": .bool(true)
+        ]
+    )
+
+    let result = CanonicalRunAdapter.execute(request: request)
+    try expect(result.status == .succeeded, "Apply canonique devrait reussir")
+    try expect(result.metadata["regles_source"] == .string("muniregles_bundle"), "Source regles attendue: muniregles_bundle")
+    try expect(result.metadata["regles_rule_id"] == .string("rule-document-template"), "Rule ID attendu")
+
+    let expectedName1 = "Résolution NO 2025-54 – Extension du délai de construction pour Plantation d’arbres M.M. inc. – 2025-02-03.pdf"
+    let expectedName2 = "Ordre du jour – Séance du conseil – 2025-03-17.pdf"
+
+    try expect(
+        FileManager.default.fileExists(atPath: tempDir.appendingPathComponent(expectedName1).path),
+        "Le premier nom attendu n'a pas ete produit"
+    )
+    try expect(
+        FileManager.default.fileExists(atPath: tempDir.appendingPathComponent(expectedName2).path),
+        "Le second nom attendu n'a pas ete produit"
+    )
+    try expect(!FileManager.default.fileExists(atPath: sourceFile1.path), "doc1.pdf ne doit plus exister")
+    try expect(!FileManager.default.fileExists(atPath: sourceFile2.path), "doc2.pdf ne doit plus exister")
 }
 
 runner.run("Canonical preview avec template non supporte conserve fallback") {
