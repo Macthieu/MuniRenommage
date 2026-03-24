@@ -100,6 +100,24 @@ private struct MuniReglesTraceContext: Sendable {
     let applyRuleRequested: Bool
 }
 
+private struct DocumentMetadataEntryPayload: Codable, Sendable {
+    let sourceFile: String
+    let documentType: String
+    let documentSubject: String
+    let documentDate: String
+
+    enum CodingKeys: String, CodingKey {
+        case sourceFile = "source_file"
+        case documentType = "document_type"
+        case documentSubject = "document_subject"
+        case documentDate = "document_date"
+    }
+}
+
+private struct DocumentMetadataPayload: Codable, Sendable {
+    let documents: [DocumentMetadataEntryPayload]
+}
+
 private struct CanonicalExecutionContext: Sendable {
     let action: CanonicalAction
     let preset: RenamePreset
@@ -110,6 +128,8 @@ private struct CanonicalExecutionContext: Sendable {
     let dryRun: Bool
     let confirmApply: Bool
     let reglesTrace: MuniReglesTraceContext
+    let documentMetadataBySourceFile: [String: DocumentMetadataEntryPayload]
+    let usesDocumentMetadataTemplate: Bool
 }
 
 public enum CanonicalRunAdapter {
@@ -223,7 +243,14 @@ public enum CanonicalRunAdapter {
             previewOnlySelection: false,
             rules: effectiveRules
         )
-        let warningCount = preview.byID.values.filter { !$0.status.isEmpty }.count
+        let outputNameResolution = resolveOutputNames(
+            from: preview,
+            items: items,
+            context: context
+        )
+        let outputNames = outputNameResolution.names
+        let plan = RenameEngine.buildPlan(items: items, selection: [], outputNames: outputNames, rules: effectiveRules)
+        let warningCount = plan.statuses.values.filter { !$0.isEmpty }.count
 
         if context.action == .preview || context.dryRun {
             let finishedAt = isoTimestamp()
@@ -243,7 +270,8 @@ public enum CanonicalRunAdapter {
                     "action": .string(context.action.rawValue),
                     "dry_run": .bool(context.dryRun),
                     "files_analyzed": .number(Double(items.count)),
-                    "warning_count": .number(Double(warningCount))
+                    "warning_count": .number(Double(warningCount)),
+                    "regles_document_metadata_applied_count": .number(Double(outputNameResolution.metadataAppliedCount))
                     ],
                     context: context
                 )
@@ -254,8 +282,6 @@ public enum CanonicalRunAdapter {
             throw CanonicalRunAdapterError.explicitConfirmationRequired
         }
 
-        let outputNames = Dictionary(uniqueKeysWithValues: preview.byID.map { ($0.key, $0.value.outputName) })
-        let plan = RenameEngine.buildPlan(items: items, selection: [], outputNames: outputNames, rules: effectiveRules)
         let report = RenameEngine.apply(plan: plan, rules: effectiveRules)
         let finishedAt = isoTimestamp()
 
@@ -295,7 +321,8 @@ public enum CanonicalRunAdapter {
                 "files_analyzed": .number(Double(items.count)),
                 "renamed_count": .number(Double(report.renamedCount)),
                 "error_count": .number(Double(report.errorCount)),
-                "warning_count": .number(Double(warningCount))
+                "warning_count": .number(Double(warningCount)),
+                "regles_document_metadata_applied_count": .number(Double(outputNameResolution.metadataAppliedCount))
                 ],
                 context: context
             )
@@ -344,7 +371,9 @@ public enum CanonicalRunAdapter {
             includeHidden: includeHidden,
             dryRun: dryRun,
             confirmApply: confirmApply,
-            reglesTrace: reglesResolution.trace
+            reglesTrace: reglesResolution.trace,
+            documentMetadataBySourceFile: reglesResolution.documentMetadataBySourceFile,
+            usesDocumentMetadataTemplate: reglesResolution.usesDocumentMetadataTemplate
         )
     }
 
@@ -420,7 +449,12 @@ public enum CanonicalRunAdapter {
     private static func resolveMuniReglesTrace(
         from request: ToolRequest,
         baseRules: RenameRules
-    ) throws -> (trace: MuniReglesTraceContext, effectiveRules: RenameRules) {
+    ) throws -> (
+        trace: MuniReglesTraceContext,
+        effectiveRules: RenameRules,
+        documentMetadataBySourceFile: [String: DocumentMetadataEntryPayload],
+        usesDocumentMetadataTemplate: Bool
+    ) {
         let applyRule = try optionalBoolParameter("regles_apply_rule", in: request) ?? false
         let requestedRuleID = try optionalRawStringParameter("regles_naming_rule_id", in: request)
         let requestedClassCode = try optionalRawStringParameter("regles_class_code", in: request)
@@ -437,7 +471,9 @@ public enum CanonicalRunAdapter {
                     fallbackReason: applyRule ? "bundle_not_provided" : nil,
                     applyRuleRequested: applyRule
                 ),
-                baseRules
+                baseRules,
+                [:],
+                false
             )
         }
 
@@ -451,7 +487,9 @@ public enum CanonicalRunAdapter {
                     fallbackReason: "bundle_unreadable_or_invalid",
                     applyRuleRequested: applyRule
                 ),
-                baseRules
+                baseRules,
+                [:],
+                false
             )
         }
 
@@ -469,7 +507,9 @@ public enum CanonicalRunAdapter {
                     fallbackReason: "bundle_contains_no_naming_rules",
                     applyRuleRequested: applyRule
                 ),
-                baseRules
+                baseRules,
+                [:],
+                false
             )
         }
 
@@ -484,7 +524,9 @@ public enum CanonicalRunAdapter {
                     fallbackReason: fallbackReason,
                     applyRuleRequested: applyRule
                 ),
-                baseRules
+                baseRules,
+                [:],
+                false
             )
         }
 
@@ -498,7 +540,9 @@ public enum CanonicalRunAdapter {
                     fallbackReason: "rule_not_found_in_bundle",
                     applyRuleRequested: applyRule
                 ),
-                baseRules
+                baseRules,
+                [:],
+                false
             )
         }
 
@@ -512,7 +556,58 @@ public enum CanonicalRunAdapter {
                     fallbackReason: "regles_apply_rule_disabled",
                     applyRuleRequested: false
                 ),
-                baseRules
+                baseRules,
+                [:],
+                false
+            )
+        }
+
+        let normalizedTemplate = normalizeTemplate(selectedRule.template)
+        if normalizedTemplate == "{document_type}-{document_subject}-{document_date}" {
+            guard let metadataPath = try resolveDocumentMetadataPath(from: request) else {
+                return (
+                    MuniReglesTraceContext(
+                        source: "fallback_local",
+                        bundleVersion: bundleVersion,
+                        moduleVersion: moduleVersion,
+                        ruleID: requestedRuleID,
+                        fallbackReason: "document_metadata_not_provided",
+                        applyRuleRequested: true
+                    ),
+                    baseRules,
+                    [:],
+                    false
+                )
+            }
+
+            guard let documentMetadata = try? parseDocumentMetadataMap(fromPath: metadataPath) else {
+                return (
+                    MuniReglesTraceContext(
+                        source: "fallback_local",
+                        bundleVersion: bundleVersion,
+                        moduleVersion: moduleVersion,
+                        ruleID: requestedRuleID,
+                        fallbackReason: "document_metadata_unreadable_or_invalid",
+                        applyRuleRequested: true
+                    ),
+                    baseRules,
+                    [:],
+                    false
+                )
+            }
+
+            return (
+                MuniReglesTraceContext(
+                    source: "muniregles_bundle",
+                    bundleVersion: bundleVersion,
+                    moduleVersion: moduleVersion,
+                    ruleID: requestedRuleID,
+                    fallbackReason: nil,
+                    applyRuleRequested: true
+                ),
+                baseRules,
+                documentMetadata,
+                true
             )
         }
 
@@ -526,11 +621,12 @@ public enum CanonicalRunAdapter {
                     fallbackReason: "regles_class_code_missing",
                     applyRuleRequested: true
                 ),
-                baseRules
+                baseRules,
+                [:],
+                false
             )
         }
 
-        let normalizedTemplate = normalizeTemplate(selectedRule.template)
         var effectiveRules = baseRules
         guard applySupportedMuniReglesTemplate(
             normalizedTemplate,
@@ -546,7 +642,9 @@ public enum CanonicalRunAdapter {
                     fallbackReason: "template_not_supported",
                     applyRuleRequested: true
                 ),
-                baseRules
+                baseRules,
+                [:],
+                false
             )
         }
 
@@ -559,7 +657,9 @@ public enum CanonicalRunAdapter {
                 fallbackReason: nil,
                 applyRuleRequested: true
             ),
-            effectiveRules
+            effectiveRules,
+            [:],
+            false
         )
     }
 
@@ -587,6 +687,73 @@ public enum CanonicalRunAdapter {
         return try JSONDecoder().decode(MuniReglesBundlePayload.self, from: data)
     }
 
+    private static func resolveDocumentMetadataPath(from request: ToolRequest) throws -> String? {
+        if let explicit = try optionalStringParameter("document_metadata_path", in: request) {
+            return explicit
+        }
+
+        let metadataArtifactIDs: Set<String> = ["document_metadata", "metadata"]
+        if let artifact = request.inputArtifacts.first(where: { metadataArtifactIDs.contains($0.id.lowercased()) }) {
+            let resolved = resolvePathFromURIOrPath(artifact.uri)
+            let trimmed = resolved.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        return nil
+    }
+
+    private static func parseDocumentMetadataMap(fromPath path: String) throws -> [String: DocumentMetadataEntryPayload] {
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let payload = try JSONDecoder().decode(DocumentMetadataPayload.self, from: data)
+
+        var map: [String: DocumentMetadataEntryPayload] = [:]
+        for document in payload.documents {
+            let sourceFile = document.sourceFile.trimmingCharacters(in: .whitespacesAndNewlines)
+            let documentType = document.documentType.trimmingCharacters(in: .whitespacesAndNewlines)
+            let documentSubject = document.documentSubject.trimmingCharacters(in: .whitespacesAndNewlines)
+            let documentDate = document.documentDate.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            guard !sourceFile.isEmpty, !documentType.isEmpty, !documentSubject.isEmpty, !documentDate.isEmpty else {
+                throw CanonicalRunAdapterError.invalidParameter(
+                    "document_metadata_path",
+                    "document entries require source_file, document_type, document_subject and document_date"
+                )
+            }
+
+            let normalizedEntry = DocumentMetadataEntryPayload(
+                sourceFile: sourceFile,
+                documentType: documentType,
+                documentSubject: documentSubject,
+                documentDate: documentDate
+            )
+            for key in metadataLookupKeys(for: sourceFile) {
+                map[key] = normalizedEntry
+            }
+        }
+
+        guard !map.isEmpty else {
+            throw CanonicalRunAdapterError.invalidParameter("document_metadata_path", "documents is empty")
+        }
+
+        return map
+    }
+
+    private static func metadataLookupKeys(for sourceFile: String) -> [String] {
+        let trimmed = sourceFile.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        var keys = Set<String>()
+        keys.insert(trimmed.lowercased())
+
+        let lastComponent = URL(fileURLWithPath: trimmed).lastPathComponent
+        let normalizedLastComponent = lastComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !normalizedLastComponent.isEmpty {
+            keys.insert(normalizedLastComponent.lowercased())
+        }
+
+        return Array(keys)
+    }
+
     private static func normalizeNonEmpty(_ value: String?) -> String? {
         guard let value else {
             return nil
@@ -599,7 +766,56 @@ public enum CanonicalRunAdapter {
         template
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
+            .replacingOccurrences(of: "–", with: "-")
+            .replacingOccurrences(of: "—", with: "-")
             .replacingOccurrences(of: " ", with: "")
+    }
+
+    private static func resolveOutputNames(
+        from preview: RenamePreview,
+        items: [RenameItem],
+        context: CanonicalExecutionContext
+    ) -> (names: [UUID: String], metadataAppliedCount: Int) {
+        var outputNames = Dictionary(uniqueKeysWithValues: preview.byID.map { ($0.key, $0.value.outputName) })
+
+        guard context.usesDocumentMetadataTemplate else {
+            return (outputNames, 0)
+        }
+
+        var metadataAppliedCount = 0
+        for item in items {
+            let itemPathKey = item.url.path.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let itemNameKey = item.originalName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard let metadata = context.documentMetadataBySourceFile[itemNameKey]
+                ?? context.documentMetadataBySourceFile[itemPathKey] else {
+                continue
+            }
+
+            let newName = formattedDocumentMetadataName(
+                metadata: metadata,
+                sourceFileExtension: item.url.pathExtension
+            )
+            outputNames[item.id] = newName
+            metadataAppliedCount += 1
+        }
+
+        return (outputNames, metadataAppliedCount)
+    }
+
+    private static func formattedDocumentMetadataName(
+        metadata: DocumentMetadataEntryPayload,
+        sourceFileExtension: String
+    ) -> String {
+        let documentType = metadata.documentType.trimmingCharacters(in: .whitespacesAndNewlines)
+        let documentSubject = metadata.documentSubject.trimmingCharacters(in: .whitespacesAndNewlines)
+        let documentDate = metadata.documentDate.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let baseName = "\(documentType) – \(documentSubject) – \(documentDate)"
+        let trimmedExtension = sourceFileExtension.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedExtension.isEmpty else {
+            return baseName
+        }
+        return "\(baseName).\(trimmedExtension)"
     }
 
     private static func applySupportedMuniReglesTemplate(
