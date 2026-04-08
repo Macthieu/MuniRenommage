@@ -132,6 +132,33 @@ private struct CanonicalExecutionContext: Sendable {
     let usesDocumentMetadataTemplate: Bool
 }
 
+private enum ReglesTraceMetadataKey {
+    static let source = "regles_source"
+    static let bundleVersion = "regles_bundle_version"
+    static let moduleVersion = "regles_module_version"
+    static let ruleID = "regles_rule_id"
+    static let fallbackReason = "regles_fallback_reason"
+    static let applyRule = "regles_apply_rule"
+}
+
+private enum ReglesSource {
+    static let fallbackLocal = "fallback_local"
+    static let bundle = "muniregles_bundle"
+}
+
+private enum ReglesFallbackReason: String {
+    case bundleNotProvided = "bundle_not_provided"
+    case bundleUnreadableOrInvalid = "bundle_unreadable_or_invalid"
+    case bundleHasNoNamingRules = "bundle_has_no_naming_rules"
+    case namingRuleIDMissing = "naming_rule_id_missing"
+    case namingRuleNotFound = "naming_rule_not_found"
+    case applyRuleDisabled = "apply_rule_disabled"
+    case documentMetadataNotProvided = "document_metadata_not_provided"
+    case documentMetadataUnreadableOrInvalid = "document_metadata_unreadable_or_invalid"
+    case classCodeMissing = "class_code_missing"
+    case templateNotSupported = "template_not_supported"
+}
+
 public enum CanonicalRunAdapter {
     public static func execute(request: ToolRequest) -> ToolResult {
         let startedAt = isoTimestamp()
@@ -464,11 +491,11 @@ public enum CanonicalRunAdapter {
         guard let bundlePath else {
             return (
                 MuniReglesTraceContext(
-                    source: "fallback_local",
+                    source: ReglesSource.fallbackLocal,
                     bundleVersion: nil,
                     moduleVersion: nil,
                     ruleID: requestedRuleID,
-                    fallbackReason: applyRule ? "bundle_not_provided" : nil,
+                    fallbackReason: applyRule ? ReglesFallbackReason.bundleNotProvided.rawValue : nil,
                     applyRuleRequested: applyRule
                 ),
                 baseRules,
@@ -480,11 +507,11 @@ public enum CanonicalRunAdapter {
         guard let bundle = try? parseMuniReglesBundle(fromPath: bundlePath) else {
             return (
                 MuniReglesTraceContext(
-                    source: "fallback_local",
+                    source: ReglesSource.fallbackLocal,
                     bundleVersion: nil,
                     moduleVersion: nil,
                     ruleID: requestedRuleID,
-                    fallbackReason: "bundle_unreadable_or_invalid",
+                    fallbackReason: ReglesFallbackReason.bundleUnreadableOrInvalid.rawValue,
                     applyRuleRequested: applyRule
                 ),
                 baseRules,
@@ -500,11 +527,11 @@ public enum CanonicalRunAdapter {
         guard !namingRules.isEmpty else {
             return (
                 MuniReglesTraceContext(
-                    source: "fallback_local",
+                    source: ReglesSource.fallbackLocal,
                     bundleVersion: bundleVersion,
                     moduleVersion: moduleVersion,
                     ruleID: requestedRuleID,
-                    fallbackReason: "bundle_contains_no_naming_rules",
+                    fallbackReason: ReglesFallbackReason.bundleHasNoNamingRules.rawValue,
                     applyRuleRequested: applyRule
                 ),
                 baseRules,
@@ -514,10 +541,10 @@ public enum CanonicalRunAdapter {
         }
 
         guard let requestedRuleID, !requestedRuleID.isEmpty else {
-            let fallbackReason = applyRule ? "regles_naming_rule_id_missing" : nil
+            let fallbackReason = applyRule ? ReglesFallbackReason.namingRuleIDMissing.rawValue : nil
             return (
                 MuniReglesTraceContext(
-                    source: "fallback_local",
+                    source: ReglesSource.fallbackLocal,
                     bundleVersion: bundleVersion,
                     moduleVersion: moduleVersion,
                     ruleID: nil,
@@ -533,11 +560,11 @@ public enum CanonicalRunAdapter {
         guard let selectedRule = namingRules.first(where: { $0.id == requestedRuleID }) else {
             return (
                 MuniReglesTraceContext(
-                    source: "fallback_local",
+                    source: ReglesSource.fallbackLocal,
                     bundleVersion: bundleVersion,
                     moduleVersion: moduleVersion,
                     ruleID: requestedRuleID,
-                    fallbackReason: "rule_not_found_in_bundle",
+                    fallbackReason: ReglesFallbackReason.namingRuleNotFound.rawValue,
                     applyRuleRequested: applyRule
                 ),
                 baseRules,
@@ -549,11 +576,11 @@ public enum CanonicalRunAdapter {
         guard applyRule else {
             return (
                 MuniReglesTraceContext(
-                    source: "fallback_local",
+                    source: ReglesSource.fallbackLocal,
                     bundleVersion: bundleVersion,
                     moduleVersion: moduleVersion,
                     ruleID: requestedRuleID,
-                    fallbackReason: "regles_apply_rule_disabled",
+                    fallbackReason: ReglesFallbackReason.applyRuleDisabled.rawValue,
                     applyRuleRequested: false
                 ),
                 baseRules,
@@ -567,11 +594,11 @@ public enum CanonicalRunAdapter {
             guard let metadataPath = try resolveDocumentMetadataPath(from: request) else {
                 return (
                     MuniReglesTraceContext(
-                        source: "fallback_local",
+                        source: ReglesSource.fallbackLocal,
                         bundleVersion: bundleVersion,
                         moduleVersion: moduleVersion,
                         ruleID: requestedRuleID,
-                        fallbackReason: "document_metadata_not_provided",
+                        fallbackReason: ReglesFallbackReason.documentMetadataNotProvided.rawValue,
                         applyRuleRequested: true
                     ),
                     baseRules,
@@ -583,11 +610,11 @@ public enum CanonicalRunAdapter {
             guard let documentMetadata = try? parseDocumentMetadataMap(fromPath: metadataPath) else {
                 return (
                     MuniReglesTraceContext(
-                        source: "fallback_local",
+                        source: ReglesSource.fallbackLocal,
                         bundleVersion: bundleVersion,
                         moduleVersion: moduleVersion,
                         ruleID: requestedRuleID,
-                        fallbackReason: "document_metadata_unreadable_or_invalid",
+                        fallbackReason: ReglesFallbackReason.documentMetadataUnreadableOrInvalid.rawValue,
                         applyRuleRequested: true
                     ),
                     baseRules,
@@ -598,7 +625,7 @@ public enum CanonicalRunAdapter {
 
             return (
                 MuniReglesTraceContext(
-                    source: "muniregles_bundle",
+                    source: ReglesSource.bundle,
                     bundleVersion: bundleVersion,
                     moduleVersion: moduleVersion,
                     ruleID: requestedRuleID,
@@ -614,11 +641,11 @@ public enum CanonicalRunAdapter {
         guard let classCode = normalizeNonEmpty(requestedClassCode) else {
             return (
                 MuniReglesTraceContext(
-                    source: "fallback_local",
+                    source: ReglesSource.fallbackLocal,
                     bundleVersion: bundleVersion,
                     moduleVersion: moduleVersion,
                     ruleID: requestedRuleID,
-                    fallbackReason: "regles_class_code_missing",
+                    fallbackReason: ReglesFallbackReason.classCodeMissing.rawValue,
                     applyRuleRequested: true
                 ),
                 baseRules,
@@ -635,11 +662,11 @@ public enum CanonicalRunAdapter {
         ) else {
             return (
                 MuniReglesTraceContext(
-                    source: "fallback_local",
+                    source: ReglesSource.fallbackLocal,
                     bundleVersion: bundleVersion,
                     moduleVersion: moduleVersion,
                     ruleID: requestedRuleID,
-                    fallbackReason: "template_not_supported",
+                    fallbackReason: ReglesFallbackReason.templateNotSupported.rawValue,
                     applyRuleRequested: true
                 ),
                 baseRules,
@@ -650,7 +677,7 @@ public enum CanonicalRunAdapter {
 
         return (
             MuniReglesTraceContext(
-                source: "muniregles_bundle",
+                source: ReglesSource.bundle,
                 bundleVersion: bundleVersion,
                 moduleVersion: moduleVersion,
                 ruleID: requestedRuleID,
@@ -883,21 +910,21 @@ public enum CanonicalRunAdapter {
         context: CanonicalExecutionContext
     ) -> [String: JSONValue] {
         var merged = metadata
-        merged["regles_source"] = .string(context.reglesTrace.source)
+        merged[ReglesTraceMetadataKey.source] = .string(context.reglesTrace.source)
 
         if let bundleVersion = context.reglesTrace.bundleVersion {
-            merged["regles_bundle_version"] = .string(bundleVersion)
+            merged[ReglesTraceMetadataKey.bundleVersion] = .string(bundleVersion)
         }
         if let moduleVersion = context.reglesTrace.moduleVersion {
-            merged["regles_module_version"] = .string(moduleVersion)
+            merged[ReglesTraceMetadataKey.moduleVersion] = .string(moduleVersion)
         }
         if let ruleID = context.reglesTrace.ruleID {
-            merged["regles_rule_id"] = .string(ruleID)
+            merged[ReglesTraceMetadataKey.ruleID] = .string(ruleID)
         }
         if let fallbackReason = context.reglesTrace.fallbackReason {
-            merged["regles_fallback_reason"] = .string(fallbackReason)
+            merged[ReglesTraceMetadataKey.fallbackReason] = .string(fallbackReason)
         }
-        merged["regles_apply_rule"] = .bool(context.reglesTrace.applyRuleRequested)
+        merged[ReglesTraceMetadataKey.applyRule] = .bool(context.reglesTrace.applyRuleRequested)
 
         return merged
     }
