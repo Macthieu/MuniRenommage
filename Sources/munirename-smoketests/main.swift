@@ -25,6 +25,14 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
     }
 }
 
+func metadataString(_ result: ToolResult, _ key: String) -> String? {
+    guard case .string(let value)? = result.metadata[key] else {
+        return nil
+    }
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+}
+
 func makeTempDir(prefix: String) throws -> URL {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent(prefix + UUID().uuidString)
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
@@ -381,6 +389,93 @@ runner.run("Canonical preview retourne un resultat canonique") {
     try expect(result.status == .succeeded, "Preview canonique devrait etre en succeeded")
     try expect(result.errors.isEmpty, "Preview canonique ne doit pas produire d'erreurs")
     try expect(result.metadata["action"] == .string("preview"), "Metadata action invalide")
+}
+
+runner.run("Canonical apply accepte expected_plan_digest issu du preview") {
+    let tempDir = try makeTempDir(prefix: "munirename-canonical-plan-digest-ok-")
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let sourceFile = tempDir.appendingPathComponent("sample.txt")
+    try "TXT".data(using: .utf8)?.write(to: sourceFile)
+    let presetURL = try makePresetFile(in: tempDir, prefix: "PLAN_")
+
+    let previewRequest = ToolRequest(
+        requestID: "req-plan-digest-preview-ok",
+        tool: "MuniRenommage",
+        action: "preview",
+        inputArtifacts: [],
+        parameters: [
+            "preset_path": .string(presetURL.path),
+            "directory_path": .string(tempDir.path)
+        ]
+    )
+
+    let previewResult = CanonicalRunAdapter.execute(request: previewRequest)
+    try expect(previewResult.status == .succeeded, "Preview canonique devrait etre en succeeded")
+    guard let planDigest = metadataString(previewResult, "plan_digest") else {
+        throw NSError(
+            domain: "SmokeTests",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "plan_digest attendu dans le preview"]
+        )
+    }
+
+    let applyRequest = ToolRequest(
+        requestID: "req-plan-digest-apply-ok",
+        tool: "MuniRenommage",
+        action: "apply",
+        inputArtifacts: [],
+        parameters: [
+            "preset_path": .string(presetURL.path),
+            "directory_path": .string(tempDir.path),
+            "dry_run": .bool(false),
+            "confirm_apply": .bool(true),
+            "expected_plan_digest": .string(planDigest)
+        ]
+    )
+
+    let applyResult = CanonicalRunAdapter.execute(request: applyRequest)
+    try expect(applyResult.status == .succeeded, "Apply canonique devrait reussir")
+    try expect(metadataString(applyResult, "plan_digest") == planDigest, "Le plan_digest apply doit matcher le preview")
+    try expect(
+        FileManager.default.fileExists(atPath: tempDir.appendingPathComponent("PLAN_sample.txt").path),
+        "Le renommage attendu n'a pas ete applique"
+    )
+}
+
+runner.run("Canonical apply rejette expected_plan_digest invalide sans ecriture disque") {
+    let tempDir = try makeTempDir(prefix: "munirename-canonical-plan-digest-ko-")
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let sourceFile = tempDir.appendingPathComponent("sample.txt")
+    try "TXT".data(using: .utf8)?.write(to: sourceFile)
+    let presetURL = try makePresetFile(in: tempDir, prefix: "PLAN_")
+
+    let applyRequest = ToolRequest(
+        requestID: "req-plan-digest-apply-ko",
+        tool: "MuniRenommage",
+        action: "apply",
+        inputArtifacts: [],
+        parameters: [
+            "preset_path": .string(presetURL.path),
+            "directory_path": .string(tempDir.path),
+            "dry_run": .bool(false),
+            "confirm_apply": .bool(true),
+            "expected_plan_digest": .string("deadbeef")
+        ]
+    )
+
+    let applyResult = CanonicalRunAdapter.execute(request: applyRequest)
+    try expect(applyResult.status == .failed, "Apply doit echouer sur digest invalide")
+    try expect(
+        applyResult.errors.contains(where: { $0.code == "INVALID_PARAMETER" }),
+        "Le code d'erreur attendu INVALID_PARAMETER est absent"
+    )
+    try expect(FileManager.default.fileExists(atPath: sourceFile.path), "Le fichier source doit rester intact")
+    try expect(
+        !FileManager.default.fileExists(atPath: tempDir.appendingPathComponent("PLAN_sample.txt").path),
+        "Aucun renommage ne doit etre applique en cas de digest invalide"
+    )
 }
 
 runner.run("Canonical preview sans bundle expose fallback_local") {
