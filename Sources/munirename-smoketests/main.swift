@@ -52,9 +52,31 @@ func makeNeutralPresetFile(in directory: URL) throws -> URL {
 func makeMuniReglesBundleFile(
     in directory: URL,
     ruleID: String = "rule-default",
-    template: String = "{class_code}-{subject}"
+    template: String = "{class_code}-{subject}",
+    requiredMetadataFields: [String]? = nil
 ) throws -> URL {
     let bundleURL = directory.appendingPathComponent("muniregles-bundle.json")
+    let namingRuleContractsJSON: String
+    if let requiredMetadataFields, !requiredMetadataFields.isEmpty {
+        let fields = requiredMetadataFields
+            .map { "\"\($0)\"" }
+            .joined(separator: ", ")
+        namingRuleContractsJSON = """
+      ,
+      "naming_rule_contracts": [
+        {
+          "module_version": "0.1.0",
+          "bundle_version": "1.0",
+          "rule_id": "\(ruleID)",
+          "template": "\(template)",
+          "required_metadata_fields": [\(fields)]
+        }
+      ]
+"""
+    } else {
+        namingRuleContractsJSON = ""
+    }
+
     let payload = """
     {
       "manifest": {
@@ -97,7 +119,7 @@ func makeMuniReglesBundleFile(
         "title": "Guide",
         "conventions": ["Exemple"],
         "examples": [{"input": "doc", "output": "ADM-100_2026-03-19_doc"}]
-      }
+      }\(namingRuleContractsJSON)
     }
     """
 
@@ -792,6 +814,44 @@ runner.run("Canonical preview template supporte sans class_code expose class_cod
     try expect(result.metadata["regles_rule_id"] == .string("rule-supported"), "Rule ID fourni doit etre trace")
     try expect(
         result.metadata["regles_fallback_reason"] == .string("class_code_missing"),
+        "Raison de fallback attendue"
+    )
+}
+
+runner.run("Canonical preview preflight required_metadata_fields bloque regle si champ requis manque") {
+    let tempDir = try makeTempDir(prefix: "munirename-canonical-required-fields-preflight-")
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let sourceFile = tempDir.appendingPathComponent("sample.txt")
+    try "TXT".data(using: .utf8)?.write(to: sourceFile)
+    let presetURL = try makePresetFile(in: tempDir, prefix: "PRE_")
+    let bundleURL = try makeMuniReglesBundleFile(
+        in: tempDir,
+        ruleID: "rule-contract-preflight",
+        template: "{class_code}-{subject}",
+        requiredMetadataFields: ["class_code", "unsupported_field"]
+    )
+
+    let request = ToolRequest(
+        requestID: "req-trace-required-fields-preflight",
+        tool: "MuniRenommage",
+        action: "preview",
+        inputArtifacts: [],
+        parameters: [
+            "preset_path": .string(presetURL.path),
+            "directory_path": .string(tempDir.path),
+            "regles_bundle_path": .string(bundleURL.path),
+            "regles_naming_rule_id": .string("rule-contract-preflight"),
+            "regles_apply_rule": .bool(true),
+            "regles_class_code": .string("ADM-100")
+        ]
+    )
+
+    let result = CanonicalRunAdapter.execute(request: request)
+    try expect(result.status == .succeeded, "Preview canonique devrait rester en succeeded")
+    try expect(result.metadata["regles_source"] == .string("fallback_local"), "Source regles attendue: fallback_local")
+    try expect(
+        result.metadata["regles_fallback_reason"] == .string("required_metadata_fields_missing"),
         "Raison de fallback attendue"
     )
 }
