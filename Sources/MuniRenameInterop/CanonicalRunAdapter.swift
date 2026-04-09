@@ -73,6 +73,16 @@ private struct MuniReglesNamingRulePayload: Codable, Sendable {
     let template: String
 }
 
+private struct MuniReglesNamingRuleContractPayload: Decodable, Sendable {
+    let ruleID: String
+    let requiredMetadataFields: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case ruleID = "rule_id"
+        case requiredMetadataFields = "required_metadata_fields"
+    }
+}
+
 private struct MuniReglesNamingAndRoutingRulesPayload: Codable, Sendable {
     let namingRules: [MuniReglesNamingRulePayload]
 
@@ -81,13 +91,22 @@ private struct MuniReglesNamingAndRoutingRulesPayload: Codable, Sendable {
     }
 }
 
-private struct MuniReglesBundlePayload: Codable, Sendable {
+private struct MuniReglesBundlePayload: Decodable, Sendable {
     let manifest: MuniReglesBundleManifestPayload
     let namingAndRoutingRules: MuniReglesNamingAndRoutingRulesPayload
+    let namingRuleContracts: [MuniReglesNamingRuleContractPayload]
 
     enum CodingKeys: String, CodingKey {
         case manifest
         case namingAndRoutingRules = "naming_and_routing_rules"
+        case namingRuleContracts = "naming_rule_contracts"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        manifest = try container.decode(MuniReglesBundleManifestPayload.self, forKey: .manifest)
+        namingAndRoutingRules = try container.decode(MuniReglesNamingAndRoutingRulesPayload.self, forKey: .namingAndRoutingRules)
+        namingRuleContracts = try container.decodeIfPresent([MuniReglesNamingRuleContractPayload].self, forKey: .namingRuleContracts) ?? []
     }
 }
 
@@ -153,6 +172,7 @@ private enum ReglesFallbackReason: String {
     case namingRuleIDMissing = "naming_rule_id_missing"
     case namingRuleNotFound = "naming_rule_not_found"
     case applyRuleDisabled = "apply_rule_disabled"
+    case requiredMetadataFieldsMissing = "required_metadata_fields_missing"
     case documentMetadataNotProvided = "document_metadata_not_provided"
     case documentMetadataUnreadableOrInvalid = "document_metadata_unreadable_or_invalid"
     case classCodeMissing = "class_code_missing"
@@ -590,7 +610,31 @@ public enum CanonicalRunAdapter {
         }
 
         let normalizedTemplate = normalizeTemplate(selectedRule.template)
-        if normalizedTemplate == "{document_type}-{document_subject}-{document_date}" {
+        let requiredMetadataFields = requiredMetadataFields(
+            for: selectedRule.id,
+            from: bundle
+        )
+        let needsDocumentMetadataFromContract = requiredMetadataFields.contains(where: isDocumentMetadataField)
+        let requestedClassCodeFromContract = requiredMetadataFields.contains("class_code")
+        var contractDocumentMetadataBySourceFile: [String: DocumentMetadataEntryPayload] = [:]
+
+        if requestedClassCodeFromContract, normalizeNonEmpty(requestedClassCode) == nil {
+            return (
+                MuniReglesTraceContext(
+                    source: ReglesSource.fallbackLocal,
+                    bundleVersion: bundleVersion,
+                    moduleVersion: moduleVersion,
+                    ruleID: requestedRuleID,
+                    fallbackReason: ReglesFallbackReason.classCodeMissing.rawValue,
+                    applyRuleRequested: true
+                ),
+                baseRules,
+                [:],
+                false
+            )
+        }
+
+        if needsDocumentMetadataFromContract {
             guard let metadataPath = try resolveDocumentMetadataPath(from: request) else {
                 return (
                     MuniReglesTraceContext(
@@ -621,6 +665,79 @@ public enum CanonicalRunAdapter {
                     [:],
                     false
                 )
+            }
+
+            contractDocumentMetadataBySourceFile = documentMetadata
+        }
+
+        if !requiredMetadataFields.isEmpty {
+            let missingRequiredFields = requiredMetadataFields.filter { field in
+                switch field {
+                case "subject", "seq":
+                    return false
+                case "class_code":
+                    return normalizeNonEmpty(requestedClassCode) == nil
+                case "document_type", "document_subject", "document_date":
+                    return contractDocumentMetadataBySourceFile.isEmpty
+                default:
+                    return true
+                }
+            }
+
+            if !missingRequiredFields.isEmpty {
+                return (
+                    MuniReglesTraceContext(
+                        source: ReglesSource.fallbackLocal,
+                        bundleVersion: bundleVersion,
+                        moduleVersion: moduleVersion,
+                        ruleID: requestedRuleID,
+                        fallbackReason: ReglesFallbackReason.requiredMetadataFieldsMissing.rawValue,
+                        applyRuleRequested: true
+                    ),
+                    baseRules,
+                    [:],
+                    false
+                )
+            }
+        }
+
+        if normalizedTemplate == "{document_type}-{document_subject}-{document_date}" {
+            let documentMetadata: [String: DocumentMetadataEntryPayload]
+            if !contractDocumentMetadataBySourceFile.isEmpty {
+                documentMetadata = contractDocumentMetadataBySourceFile
+            } else {
+                guard let metadataPath = try resolveDocumentMetadataPath(from: request) else {
+                    return (
+                        MuniReglesTraceContext(
+                            source: ReglesSource.fallbackLocal,
+                            bundleVersion: bundleVersion,
+                            moduleVersion: moduleVersion,
+                            ruleID: requestedRuleID,
+                            fallbackReason: ReglesFallbackReason.documentMetadataNotProvided.rawValue,
+                            applyRuleRequested: true
+                        ),
+                        baseRules,
+                        [:],
+                        false
+                    )
+                }
+
+                guard let parsed = try? parseDocumentMetadataMap(fromPath: metadataPath) else {
+                    return (
+                        MuniReglesTraceContext(
+                            source: ReglesSource.fallbackLocal,
+                            bundleVersion: bundleVersion,
+                            moduleVersion: moduleVersion,
+                            ruleID: requestedRuleID,
+                            fallbackReason: ReglesFallbackReason.documentMetadataUnreadableOrInvalid.rawValue,
+                            applyRuleRequested: true
+                        ),
+                        baseRules,
+                        [:],
+                        false
+                    )
+                }
+                documentMetadata = parsed
             }
 
             return (
@@ -688,6 +805,37 @@ public enum CanonicalRunAdapter {
             [:],
             false
         )
+    }
+
+    private static func requiredMetadataFields(
+        for ruleID: String,
+        from bundle: MuniReglesBundlePayload
+    ) -> [String] {
+        guard let contract = bundle.namingRuleContracts.first(where: { $0.ruleID == ruleID }) else {
+            return []
+        }
+
+        var seen: Set<String> = []
+        var normalized: [String] = []
+        for field in contract.requiredMetadataFields {
+            let trimmed = field.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !trimmed.isEmpty else {
+                continue
+            }
+            if seen.insert(trimmed).inserted {
+                normalized.append(trimmed)
+            }
+        }
+        return normalized
+    }
+
+    private static func isDocumentMetadataField(_ field: String) -> Bool {
+        switch field {
+        case "document_type", "document_subject", "document_date":
+            return true
+        default:
+            return false
+        }
     }
 
     private static func resolveMuniReglesBundlePath(from request: ToolRequest) throws -> String? {
