@@ -149,6 +149,16 @@ private struct CanonicalExecutionContext: Sendable {
     let reglesTrace: MuniReglesTraceContext
     let documentMetadataBySourceFile: [String: DocumentMetadataEntryPayload]
     let usesDocumentMetadataTemplate: Bool
+    let expectedPlanDigest: String?
+}
+
+private struct CanonicalPlanningOutcome {
+    let effectiveRules: RenameRules
+    let items: [RenameItem]
+    let outputNameResolution: (names: [UUID: String], metadataAppliedCount: Int)
+    let plan: RenamePlan
+    let warningCount: Int
+    let planDigest: String
 }
 
 private enum ReglesTraceMetadataKey {
@@ -158,6 +168,9 @@ private enum ReglesTraceMetadataKey {
     static let ruleID = "regles_rule_id"
     static let fallbackReason = "regles_fallback_reason"
     static let applyRule = "regles_apply_rule"
+    static let planDigest = "plan_digest"
+    static let plannedItemCount = "planned_item_count"
+    static let plannedOperationCount = "planned_operation_count"
 }
 
 private enum ReglesSource {
@@ -282,26 +295,15 @@ public enum CanonicalRunAdapter {
         if context.recursive { effectiveRules.filters.recursive = true }
         if context.includeHidden { effectiveRules.filters.includeHidden = true }
 
-        let items = try FileInventoryService.collectFiles(directory: directory, filters: effectiveRules.filters)
-        let preview = RenameEngine.computePreview(
-            items: items,
-            directoryURL: directory,
-            selection: [],
-            previewOnlySelection: false,
-            rules: effectiveRules
+        let planning = try buildPlanningOutcome(
+            context: context,
+            directory: directory,
+            effectiveRules: effectiveRules
         )
-        let outputNameResolution = resolveOutputNames(
-            from: preview,
-            items: items,
-            context: context
-        )
-        let outputNames = outputNameResolution.names
-        let plan = RenameEngine.buildPlan(items: items, selection: [], outputNames: outputNames, rules: effectiveRules)
-        let warningCount = plan.statuses.values.filter { !$0.isEmpty }.count
 
         if context.action == .preview || context.dryRun {
             let finishedAt = isoTimestamp()
-            let status: ToolStatus = warningCount > 0 ? .needsReview : .succeeded
+            let status: ToolStatus = planning.warningCount > 0 ? .needsReview : .succeeded
             let summary = context.action == .apply
                 ? "Apply request executed in dry-run mode."
                 : "Preview completed."
@@ -316,9 +318,12 @@ public enum CanonicalRunAdapter {
                     [
                     "action": .string(context.action.rawValue),
                     "dry_run": .bool(context.dryRun),
-                    "files_analyzed": .number(Double(items.count)),
-                    "warning_count": .number(Double(warningCount)),
-                    "regles_document_metadata_applied_count": .number(Double(outputNameResolution.metadataAppliedCount))
+                    "files_analyzed": .number(Double(planning.items.count)),
+                    "warning_count": .number(Double(planning.warningCount)),
+                    "regles_document_metadata_applied_count": .number(Double(planning.outputNameResolution.metadataAppliedCount)),
+                    ReglesTraceMetadataKey.planDigest: .string(planning.planDigest),
+                    ReglesTraceMetadataKey.plannedItemCount: .number(Double(planning.items.count)),
+                    ReglesTraceMetadataKey.plannedOperationCount: .number(Double(planning.plan.operations.count))
                     ],
                     context: context
                 )
@@ -329,7 +334,15 @@ public enum CanonicalRunAdapter {
             throw CanonicalRunAdapterError.explicitConfirmationRequired
         }
 
-        let report = RenameEngine.apply(plan: plan, rules: effectiveRules)
+        if let expectedPlanDigest = context.expectedPlanDigest,
+           expectedPlanDigest != planning.planDigest {
+            throw CanonicalRunAdapterError.invalidParameter(
+                "expected_plan_digest",
+                "computed plan digest does not match preview digest"
+            )
+        }
+
+        let report = RenameEngine.apply(plan: planning.plan, rules: planning.effectiveRules)
         let finishedAt = isoTimestamp()
 
         let operationErrors = report.statuses
@@ -365,11 +378,14 @@ public enum CanonicalRunAdapter {
                 [
                 "action": .string("apply"),
                 "dry_run": .bool(false),
-                "files_analyzed": .number(Double(items.count)),
+                "files_analyzed": .number(Double(planning.items.count)),
                 "renamed_count": .number(Double(report.renamedCount)),
                 "error_count": .number(Double(report.errorCount)),
-                "warning_count": .number(Double(warningCount)),
-                "regles_document_metadata_applied_count": .number(Double(outputNameResolution.metadataAppliedCount))
+                "warning_count": .number(Double(planning.warningCount)),
+                "regles_document_metadata_applied_count": .number(Double(planning.outputNameResolution.metadataAppliedCount)),
+                ReglesTraceMetadataKey.planDigest: .string(planning.planDigest),
+                ReglesTraceMetadataKey.plannedItemCount: .number(Double(planning.items.count)),
+                ReglesTraceMetadataKey.plannedOperationCount: .number(Double(planning.plan.operations.count))
                 ],
                 context: context
             )
@@ -402,6 +418,7 @@ public enum CanonicalRunAdapter {
         }
 
         let confirmApply = try optionalBoolParameter("confirm_apply", in: request) ?? false
+        let expectedPlanDigest = try optionalRawStringParameter("expected_plan_digest", in: request)
 
         if action != .validatePreset, directoryURL == nil {
             throw CanonicalRunAdapterError.missingParameter("directory_path")
@@ -420,7 +437,8 @@ public enum CanonicalRunAdapter {
             confirmApply: confirmApply,
             reglesTrace: reglesResolution.trace,
             documentMetadataBySourceFile: reglesResolution.documentMetadataBySourceFile,
-            usesDocumentMetadataTemplate: reglesResolution.usesDocumentMetadataTemplate
+            usesDocumentMetadataTemplate: reglesResolution.usesDocumentMetadataTemplate,
+            expectedPlanDigest: expectedPlanDigest
         )
     }
 
@@ -975,6 +993,77 @@ public enum CanonicalRunAdapter {
         }
 
         return (outputNames, metadataAppliedCount)
+    }
+
+    private static func buildPlanningOutcome(
+        context: CanonicalExecutionContext,
+        directory: URL,
+        effectiveRules: RenameRules
+    ) throws -> CanonicalPlanningOutcome {
+        let items = try FileInventoryService.collectFiles(directory: directory, filters: effectiveRules.filters)
+        let preview = RenameEngine.computePreview(
+            items: items,
+            directoryURL: directory,
+            selection: [],
+            previewOnlySelection: false,
+            rules: effectiveRules
+        )
+        let outputNameResolution = resolveOutputNames(
+            from: preview,
+            items: items,
+            context: context
+        )
+        let plan = RenameEngine.buildPlan(
+            items: items,
+            selection: [],
+            outputNames: outputNameResolution.names,
+            rules: effectiveRules
+        )
+        let warningCount = plan.statuses.values.filter { !$0.isEmpty }.count
+        let planDigest = computePlanDigest(items: items, outputNames: outputNameResolution.names, plan: plan)
+
+        return CanonicalPlanningOutcome(
+            effectiveRules: effectiveRules,
+            items: items,
+            outputNameResolution: outputNameResolution,
+            plan: plan,
+            warningCount: warningCount,
+            planDigest: planDigest
+        )
+    }
+
+    private static func computePlanDigest(
+        items: [RenameItem],
+        outputNames: [UUID: String],
+        plan: RenamePlan
+    ) -> String {
+        let operationByID = Dictionary(uniqueKeysWithValues: plan.operations.map { ($0.id, $0) })
+        let sortedItems = items.sorted {
+            $0.url.path.localizedStandardCompare($1.url.path) == .orderedAscending
+        }
+
+        var lines: [String] = []
+        lines.reserveCapacity(sortedItems.count)
+
+        for item in sortedItems {
+            let sourcePath = item.url.standardizedFileURL.path
+            let outputName = outputNames[item.id] ?? item.originalName
+            let destinationPath = operationByID[item.id]?.destinationURL.standardizedFileURL.path ?? ""
+            let status = plan.statuses[item.id] ?? ""
+            lines.append("\(sourcePath)|\(outputName)|\(destinationPath)|\(status)")
+        }
+
+        return fnv1a64Hex(lines.joined(separator: "\n"))
+    }
+
+    private static func fnv1a64Hex(_ value: String) -> String {
+        var hash: UInt64 = 0xcbf29ce484222325
+        let prime: UInt64 = 0x100000001b3
+        for byte in value.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* prime
+        }
+        return String(format: "%016llx", hash)
     }
 
     private static func formattedDocumentMetadataName(
