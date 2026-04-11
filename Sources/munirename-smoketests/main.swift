@@ -33,6 +33,13 @@ func metadataString(_ result: ToolResult, _ key: String) -> String? {
     return trimmed.isEmpty ? nil : trimmed
 }
 
+func metadataNumber(_ result: ToolResult, _ key: String) -> Double? {
+    guard case .number(let value)? = result.metadata[key] else {
+        return nil
+    }
+    return value
+}
+
 func makeTempDir(prefix: String) throws -> URL {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent(prefix + UUID().uuidString)
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
@@ -476,6 +483,148 @@ runner.run("Canonical apply rejette expected_plan_digest invalide sans ecriture 
         !FileManager.default.fileExists(atPath: tempDir.appendingPathComponent("PLAN_sample.txt").path),
         "Aucun renommage ne doit etre applique en cas de digest invalide"
     )
+}
+
+runner.run("Canonical preview/apply collisions internes restent deterministes sans overwrite implicite") {
+    let tempDir = try makeTempDir(prefix: "munirename-canonical-collision-deterministic-")
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let sourceFile1 = tempDir.appendingPathComponent("doc1.pdf")
+    let sourceFile2 = tempDir.appendingPathComponent("doc2.pdf")
+    try "PDF1".data(using: .utf8)?.write(to: sourceFile1)
+    try "PDF2".data(using: .utf8)?.write(to: sourceFile2)
+
+    let presetURL = try makeNeutralPresetFile(in: tempDir)
+    let bundleURL = try makeMuniReglesBundleFile(
+        in: tempDir,
+        ruleID: "rule-document-collision",
+        template: "{document_type} – {document_subject} – {document_date}"
+    )
+    let metadataURL = try makeDocumentMetadataFile(
+        in: tempDir,
+        entries: [
+            (
+                sourceFile: "doc1.pdf",
+                documentType: "Résolution NO 2025-54",
+                documentSubject: "Titre identique",
+                documentDate: "2025-02-03"
+            ),
+            (
+                sourceFile: "doc2.pdf",
+                documentType: "Résolution NO 2025-54",
+                documentSubject: "Titre identique",
+                documentDate: "2025-02-03"
+            )
+        ]
+    )
+
+    let previewRequest = ToolRequest(
+        requestID: "req-collision-preview",
+        tool: "MuniRenommage",
+        action: "preview",
+        inputArtifacts: [],
+        parameters: [
+            "preset_path": .string(presetURL.path),
+            "directory_path": .string(tempDir.path),
+            "regles_bundle_path": .string(bundleURL.path),
+            "regles_naming_rule_id": .string("rule-document-collision"),
+            "regles_apply_rule": .bool(true),
+            "document_metadata_path": .string(metadataURL.path)
+        ]
+    )
+
+    let previewResult = CanonicalRunAdapter.execute(request: previewRequest)
+    try expect(previewResult.status == .needsReview, "Preview collision devrait etre en needs_review")
+    try expect(metadataNumber(previewResult, "collision_count") == 2, "collision_count preview attendu a 2")
+    try expect(metadataNumber(previewResult, "warning_count") == 2, "warning_count preview attendu a 2")
+    try expect(
+        metadataString(previewResult, "overwrite_policy") == "forbid_implicit_overwrite",
+        "La policy d'overwrite attendue est absente"
+    )
+
+    let applyRequest = ToolRequest(
+        requestID: "req-collision-apply",
+        tool: "MuniRenommage",
+        action: "apply",
+        inputArtifacts: [],
+        parameters: [
+            "preset_path": .string(presetURL.path),
+            "directory_path": .string(tempDir.path),
+            "regles_bundle_path": .string(bundleURL.path),
+            "regles_naming_rule_id": .string("rule-document-collision"),
+            "regles_apply_rule": .bool(true),
+            "document_metadata_path": .string(metadataURL.path),
+            "dry_run": .bool(false),
+            "confirm_apply": .bool(true)
+        ]
+    )
+
+    let applyResult = CanonicalRunAdapter.execute(request: applyRequest)
+    try expect(applyResult.status == .failed, "Apply collision doit echouer proprement")
+    try expect(metadataNumber(applyResult, "collision_count") == 2, "collision_count apply attendu a 2")
+    try expect(FileManager.default.fileExists(atPath: sourceFile1.path), "doc1.pdf doit rester en place")
+    try expect(FileManager.default.fileExists(atPath: sourceFile2.path), "doc2.pdf doit rester en place")
+
+    let expectedCollisionName = "Résolution NO 2025-54 – Titre identique – 2025-02-03.pdf"
+    try expect(
+        !FileManager.default.fileExists(atPath: tempDir.appendingPathComponent(expectedCollisionName).path),
+        "Aucun fichier cible ne doit etre cree en cas de collision interne"
+    )
+}
+
+runner.run("Canonical idempotence preserve deja-au-bon-nom en preview et apply") {
+    let tempDir = try makeTempDir(prefix: "munirename-canonical-idempotence-")
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let inboxDir = tempDir.appendingPathComponent("inbox")
+    try FileManager.default.createDirectory(at: inboxDir, withIntermediateDirectories: true)
+    let sourceFile = inboxDir.appendingPathComponent("sample.txt")
+    try "TXT".data(using: .utf8)?.write(to: sourceFile)
+    let presetURL = try makeNeutralPresetFile(in: tempDir)
+
+    let previewRequest = ToolRequest(
+        requestID: "req-idempotence-preview",
+        tool: "MuniRenommage",
+        action: "preview",
+        inputArtifacts: [],
+        parameters: [
+            "preset_path": .string(presetURL.path),
+            "directory_path": .string(inboxDir.path)
+        ]
+    )
+
+    let previewResult = CanonicalRunAdapter.execute(request: previewRequest)
+    try expect(previewResult.status == .succeeded, "Preview idempotent devrait etre en succeeded")
+    try expect(metadataNumber(previewResult, "idempotent_count") == 1, "idempotent_count preview attendu a 1")
+    try expect(metadataNumber(previewResult, "planned_operation_count") == 0, "Aucune operation planifiee attendue")
+
+    guard let planDigest = metadataString(previewResult, "plan_digest") else {
+        throw NSError(
+            domain: "SmokeTests",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "plan_digest attendu pour le scenario idempotent"]
+        )
+    }
+
+    let applyRequest = ToolRequest(
+        requestID: "req-idempotence-apply",
+        tool: "MuniRenommage",
+        action: "apply",
+        inputArtifacts: [],
+        parameters: [
+            "preset_path": .string(presetURL.path),
+            "directory_path": .string(inboxDir.path),
+            "dry_run": .bool(false),
+            "confirm_apply": .bool(true),
+            "expected_plan_digest": .string(planDigest)
+        ]
+    )
+
+    let applyResult = CanonicalRunAdapter.execute(request: applyRequest)
+    try expect(applyResult.status == .succeeded, "Apply idempotent devrait rester en succeeded")
+    try expect(metadataNumber(applyResult, "renamed_count") == 0, "Aucun renommage effectif attendu")
+    try expect(metadataNumber(applyResult, "idempotent_count") == 1, "idempotent_count apply attendu a 1")
+    try expect(FileManager.default.fileExists(atPath: sourceFile.path), "Le fichier deja conforme doit rester intact")
 }
 
 runner.run("Canonical preview sans bundle expose fallback_local") {
