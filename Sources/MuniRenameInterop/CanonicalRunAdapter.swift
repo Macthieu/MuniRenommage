@@ -157,8 +157,15 @@ private struct CanonicalPlanningOutcome {
     let items: [RenameItem]
     let outputNameResolution: (names: [UUID: String], metadataAppliedCount: Int)
     let plan: RenamePlan
-    let warningCount: Int
+    let diagnostics: PlanningDiagnostics
     let planDigest: String
+}
+
+private struct PlanningDiagnostics {
+    let warningCount: Int
+    let collisionCount: Int
+    let existingDestinationCount: Int
+    let idempotentCount: Int
 }
 
 private enum ReglesTraceMetadataKey {
@@ -171,6 +178,11 @@ private enum ReglesTraceMetadataKey {
     static let planDigest = "plan_digest"
     static let plannedItemCount = "planned_item_count"
     static let plannedOperationCount = "planned_operation_count"
+    static let warningCount = "warning_count"
+    static let collisionCount = "collision_count"
+    static let existingDestinationCount = "existing_destination_count"
+    static let idempotentCount = "idempotent_count"
+    static let overwritePolicy = "overwrite_policy"
 }
 
 private enum ReglesSource {
@@ -303,7 +315,7 @@ public enum CanonicalRunAdapter {
 
         if context.action == .preview || context.dryRun {
             let finishedAt = isoTimestamp()
-            let status: ToolStatus = planning.warningCount > 0 ? .needsReview : .succeeded
+            let status: ToolStatus = planning.diagnostics.warningCount > 0 ? .needsReview : .succeeded
             let summary = context.action == .apply
                 ? "Apply request executed in dry-run mode."
                 : "Preview completed."
@@ -319,11 +331,15 @@ public enum CanonicalRunAdapter {
                     "action": .string(context.action.rawValue),
                     "dry_run": .bool(context.dryRun),
                     "files_analyzed": .number(Double(planning.items.count)),
-                    "warning_count": .number(Double(planning.warningCount)),
                     "regles_document_metadata_applied_count": .number(Double(planning.outputNameResolution.metadataAppliedCount)),
                     ReglesTraceMetadataKey.planDigest: .string(planning.planDigest),
                     ReglesTraceMetadataKey.plannedItemCount: .number(Double(planning.items.count)),
-                    ReglesTraceMetadataKey.plannedOperationCount: .number(Double(planning.plan.operations.count))
+                    ReglesTraceMetadataKey.plannedOperationCount: .number(Double(planning.plan.operations.count)),
+                    ReglesTraceMetadataKey.warningCount: .number(Double(planning.diagnostics.warningCount)),
+                    ReglesTraceMetadataKey.collisionCount: .number(Double(planning.diagnostics.collisionCount)),
+                    ReglesTraceMetadataKey.existingDestinationCount: .number(Double(planning.diagnostics.existingDestinationCount)),
+                    ReglesTraceMetadataKey.idempotentCount: .number(Double(planning.diagnostics.idempotentCount)),
+                    ReglesTraceMetadataKey.overwritePolicy: .string("forbid_implicit_overwrite")
                     ],
                     context: context
                 )
@@ -363,7 +379,25 @@ public enum CanonicalRunAdapter {
                 finishedAt: finishedAt,
                 errors: operationErrors.isEmpty ? [CanonicalRunAdapterError.runtimeFailure("Rename apply failed.").toolError] : operationErrors,
                 summary: "Apply completed with errors.",
-                additionalMetadata: withReglesTraceMetadata([:], context: context)
+                additionalMetadata: withReglesTraceMetadata(
+                    [
+                    "action": .string("apply"),
+                    "dry_run": .bool(false),
+                    "files_analyzed": .number(Double(planning.items.count)),
+                    "renamed_count": .number(Double(report.renamedCount)),
+                    "error_count": .number(Double(report.errorCount)),
+                    "regles_document_metadata_applied_count": .number(Double(planning.outputNameResolution.metadataAppliedCount)),
+                    ReglesTraceMetadataKey.planDigest: .string(planning.planDigest),
+                    ReglesTraceMetadataKey.plannedItemCount: .number(Double(planning.items.count)),
+                    ReglesTraceMetadataKey.plannedOperationCount: .number(Double(planning.plan.operations.count)),
+                    ReglesTraceMetadataKey.warningCount: .number(Double(planning.diagnostics.warningCount)),
+                    ReglesTraceMetadataKey.collisionCount: .number(Double(planning.diagnostics.collisionCount)),
+                    ReglesTraceMetadataKey.existingDestinationCount: .number(Double(planning.diagnostics.existingDestinationCount)),
+                    ReglesTraceMetadataKey.idempotentCount: .number(Double(planning.diagnostics.idempotentCount)),
+                    ReglesTraceMetadataKey.overwritePolicy: .string("forbid_implicit_overwrite")
+                    ],
+                    context: context
+                )
             )
         }
 
@@ -381,11 +415,15 @@ public enum CanonicalRunAdapter {
                 "files_analyzed": .number(Double(planning.items.count)),
                 "renamed_count": .number(Double(report.renamedCount)),
                 "error_count": .number(Double(report.errorCount)),
-                "warning_count": .number(Double(planning.warningCount)),
                 "regles_document_metadata_applied_count": .number(Double(planning.outputNameResolution.metadataAppliedCount)),
                 ReglesTraceMetadataKey.planDigest: .string(planning.planDigest),
                 ReglesTraceMetadataKey.plannedItemCount: .number(Double(planning.items.count)),
-                ReglesTraceMetadataKey.plannedOperationCount: .number(Double(planning.plan.operations.count))
+                ReglesTraceMetadataKey.plannedOperationCount: .number(Double(planning.plan.operations.count)),
+                ReglesTraceMetadataKey.warningCount: .number(Double(planning.diagnostics.warningCount)),
+                ReglesTraceMetadataKey.collisionCount: .number(Double(planning.diagnostics.collisionCount)),
+                ReglesTraceMetadataKey.existingDestinationCount: .number(Double(planning.diagnostics.existingDestinationCount)),
+                ReglesTraceMetadataKey.idempotentCount: .number(Double(planning.diagnostics.idempotentCount)),
+                ReglesTraceMetadataKey.overwritePolicy: .string("forbid_implicit_overwrite")
                 ],
                 context: context
             )
@@ -1019,7 +1057,7 @@ public enum CanonicalRunAdapter {
             outputNames: outputNameResolution.names,
             rules: effectiveRules
         )
-        let warningCount = plan.statuses.values.filter { !$0.isEmpty }.count
+        let diagnostics = planningDiagnostics(items: items, outputNames: outputNameResolution.names, plan: plan)
         let planDigest = computePlanDigest(items: items, outputNames: outputNameResolution.names, plan: plan)
 
         return CanonicalPlanningOutcome(
@@ -1027,8 +1065,42 @@ public enum CanonicalRunAdapter {
             items: items,
             outputNameResolution: outputNameResolution,
             plan: plan,
-            warningCount: warningCount,
+            diagnostics: diagnostics,
             planDigest: planDigest
+        )
+    }
+
+    private static func planningDiagnostics(
+        items: [RenameItem],
+        outputNames: [UUID: String],
+        plan: RenamePlan
+    ) -> PlanningDiagnostics {
+        let warningCount = plan.statuses.values.filter { !$0.isEmpty }.count
+        let collisionCount = plan.statuses.values.filter { $0.hasPrefix("Collision interne:") }.count
+        let existingDestinationCount = plan.statuses.values.filter { $0.hasPrefix("Existant:") }.count
+
+        let operationIDs = Set(plan.operations.map(\.id))
+        var idempotentCount = 0
+        for item in items {
+            let status = plan.statuses[item.id] ?? ""
+            if !status.isEmpty {
+                continue
+            }
+            if operationIDs.contains(item.id) {
+                continue
+            }
+
+            let outputName = outputNames[item.id] ?? item.originalName
+            if outputName == item.originalName {
+                idempotentCount += 1
+            }
+        }
+
+        return PlanningDiagnostics(
+            warningCount: warningCount,
+            collisionCount: collisionCount,
+            existingDestinationCount: existingDestinationCount,
+            idempotentCount: idempotentCount
         )
     }
 
